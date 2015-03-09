@@ -193,6 +193,7 @@ extern struct uri *cwuri;
 
 extern size_t uri_encode ( const char *string, unsigned int field,
 			   char *buf, ssize_t len );
+extern void uri_decode ( char *string );
 extern struct uri * parse_uri ( const char *uri_string );
 extern size_t format_uri ( const struct uri *uri, char *buf, size_t len );
 extern char * format_uri_alloc ( const struct uri *uri );

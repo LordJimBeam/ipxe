@@ -42,7 +42,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
  * URI decoding can never increase the length of a string; we can
  * therefore safely decode in place.
  */
-static void uri_decode ( char *string ) {
+void uri_decode ( char *string ) {
 	char *dest = string;
 	char hexbuf[3];
 	char *hexbuf_end;

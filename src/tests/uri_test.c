@@ -493,11 +493,11 @@ static struct uri_test uri_mailto = {
 
 /** HTTP URI with all the trimmings */
 static struct uri_test uri_http_all = {
-	"http://anon:password@example.com:3001/~foo/cgi-bin/foo.pl?a=b&c=d#bit",
+	"http://anon:pass%3Fword@example.com:3001/~foo/cgi-bin/foo.pl?a=b&c=d#bit",
 	{
 		.scheme = "http",
 		.user = "anon",
-		.password = "password",
+		.password = "pass?word",
 		.host = "example.com",
 		.port = "3001",
 		.path = "/~foo/cgi-bin/foo.pl",
