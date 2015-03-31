@@ -7,7 +7,7 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <byteswap.h>
 #include <ipxe/list.h>
@@ -77,6 +77,9 @@ struct usb_setup_packet {
 
 /** Class-specific request type */
 #define USB_TYPE_CLASS ( 1 << 5 )
+
+/** Vendor-specific request type */
+#define USB_TYPE_VENDOR ( 2 << 5 )
 
 /** Request recipient is the device */
 #define USB_RECIP_DEVICE ( 0 << 0 )
@@ -246,6 +249,9 @@ struct usb_endpoint_descriptor {
 /** Endpoint attribute transfer type mask */
 #define USB_ENDPOINT_ATTR_TYPE_MASK 0x03
 
+/** Endpoint periodic type */
+#define USB_ENDPOINT_ATTR_PERIODIC 0x01
+
 /** Control endpoint transfer type */
 #define USB_ENDPOINT_ATTR_CONTROL 0x00
 
@@ -372,11 +378,16 @@ struct usb_endpoint {
 	size_t mtu;
 	/** Maximum burst size */
 	unsigned int burst;
+	/** Interval (in microframes) */
+	unsigned int interval;
 
 	/** Endpoint is open */
 	int open;
-	/** Current failure state (if any) */
-	int rc;
+	/** Buffer fill level */
+	unsigned int fill;
+
+	/** List of halted endpoints */
+	struct list_head halted;
 
 	/** Host controller operations */
 	struct usb_endpoint_host_operations *host;
@@ -384,6 +395,13 @@ struct usb_endpoint {
 	void *priv;
 	/** Driver operations */
 	struct usb_endpoint_driver_operations *driver;
+
+	/** Recycled I/O buffer list */
+	struct list_head recycled;
+	/** Refill buffer length */
+	size_t len;
+	/** Maximum fill level */
+	unsigned int max;
 };
 
 /** USB endpoint host controller operations */
@@ -426,10 +444,11 @@ struct usb_endpoint_host_operations {
 	 *
 	 * @v ep		USB endpoint
 	 * @v iobuf		I/O buffer
+	 * @v terminate		Terminate using a short packet
 	 * @ret rc		Return status code
 	 */
-	int ( * stream ) ( struct usb_endpoint *ep,
-			   struct io_buffer *iobuf );
+	int ( * stream ) ( struct usb_endpoint *ep, struct io_buffer *iobuf,
+			   int terminate );
 };
 
 /** USB endpoint driver operations */
@@ -461,6 +480,9 @@ struct usb_endpoint_driver_operations {
 
 /** Control endpoint maximum burst size */
 #define USB_EP0_BURST 0
+
+/** Control endpoint interval */
+#define USB_EP0_INTERVAL 0
 
 /** Maximum endpoint number */
 #define USB_ENDPOINT_MAX 0x0f
@@ -496,16 +518,18 @@ usb_endpoint_init ( struct usb_endpoint *ep, struct usb_device *usb,
  * @v attributes	Attributes
  * @v mtu		Maximum packet size
  * @v burst		Maximum burst size
+ * @v interval		Interval (in microframes)
  */
 static inline __attribute__ (( always_inline )) void
 usb_endpoint_describe ( struct usb_endpoint *ep, unsigned int address,
 			unsigned int attributes, size_t mtu,
-			unsigned int burst ) {
+			unsigned int burst, unsigned int interval ) {
 
 	ep->address = address;
 	ep->attributes = attributes;
 	ep->mtu = mtu;
 	ep->burst = burst;
+	ep->interval = interval;
 }
 
 /**
@@ -540,9 +564,41 @@ extern void usb_endpoint_close ( struct usb_endpoint *ep );
 extern int usb_message ( struct usb_endpoint *ep, unsigned int request,
 			 unsigned int value, unsigned int index,
 			 struct io_buffer *iobuf );
-extern int usb_stream ( struct usb_endpoint *ep, struct io_buffer *iobuf );
+extern int usb_stream ( struct usb_endpoint *ep, struct io_buffer *iobuf,
+			int terminate );
 extern void usb_complete_err ( struct usb_endpoint *ep,
 			       struct io_buffer *iobuf, int rc );
+
+/**
+ * Initialise USB endpoint refill
+ *
+ * @v ep		USB endpoint
+ * @v len		Refill buffer length (or zero to use endpoint's MTU)
+ * @v max		Maximum fill level
+ */
+static inline __attribute__ (( always_inline )) void
+usb_refill_init ( struct usb_endpoint *ep, size_t len, unsigned int max ) {
+
+	INIT_LIST_HEAD ( &ep->recycled );
+	ep->len = len;
+	ep->max = max;
+}
+
+/**
+ * Recycle I/O buffer
+ *
+ * @v ep		USB endpoint
+ * @v iobuf		I/O buffer
+ */
+static inline __attribute__ (( always_inline )) void
+usb_recycle ( struct usb_endpoint *ep, struct io_buffer *iobuf ) {
+
+	list_add_tail ( &iobuf->list, &ep->recycled );
+}
+
+extern int usb_prefill ( struct usb_endpoint *ep );
+extern int usb_refill ( struct usb_endpoint *ep );
+extern void usb_flush ( struct usb_endpoint *ep );
 
 /**
  * A USB function
@@ -693,10 +749,16 @@ struct usb_port {
 	unsigned int protocol;
 	/** Port speed */
 	unsigned int speed;
-	/** Currently attached device (if any) */
+	/** Port has an attached device */
+	int attached;
+	/** Currently attached device (if in use)
+	 *
+	 * Note that this field will be NULL if the attached device
+	 * has been freed (e.g. because there were no drivers found).
+	 */
 	struct usb_device *usb;
 	/** List of changed ports */
-	struct list_head list;
+	struct list_head changed;
 };
 
 /** A USB hub */
@@ -715,6 +777,8 @@ struct usb_hub {
 	/** List of hubs */
 	struct list_head list;
 
+	/** Host controller operations */
+	struct usb_hub_host_operations *host;
 	/** Driver operations */
 	struct usb_hub_driver_operations *driver;
 	/** Driver private data */
@@ -727,7 +791,22 @@ struct usb_hub {
 	struct usb_port port[0];
 };
 
-/** USB hub operations */
+/** USB hub host controller operations */
+struct usb_hub_host_operations {
+	/** Open hub
+	 *
+	 * @v hub		USB hub
+	 * @ret rc		Return status code
+	 */
+	int ( * open ) ( struct usb_hub *hub );
+	/** Close hub
+	 *
+	 * @v hub		USB hub
+	 */
+	void ( * close ) ( struct usb_hub *hub );
+};
+
+/** USB hub driver operations */
 struct usb_hub_driver_operations {
 	/** Open hub
 	 *
@@ -761,6 +840,15 @@ struct usb_hub_driver_operations {
 	 * @ret rc		Return status code
 	 */
 	int ( * speed ) ( struct usb_hub *hub, struct usb_port *port );
+	/** Clear transaction translator buffer
+	 *
+	 * @v hub		USB hub
+	 * @v port		USB port
+	 * @v ep		USB endpoint
+	 * @ret rc		Return status code
+	 */
+	int ( * clear_tt ) ( struct usb_hub *hub, struct usb_port *port,
+			     struct usb_endpoint *ep );
 };
 
 /**
@@ -807,6 +895,20 @@ struct usb_bus {
 	/** Host controller operations set */
 	struct usb_host_operations *op;
 
+	/** Largest transfer allowed on the bus */
+	size_t mtu;
+	/** Address in-use mask
+	 *
+	 * This is used only by buses which perform manual address
+	 * assignment.  USB allows for addresses in the range [1,127].
+	 * We use a simple bitmask which restricts us to the range
+	 * [1,64]; this is unlikely to be a problem in practice.  For
+	 * comparison: controllers which perform autonomous address
+	 * assignment (such as xHCI) typically allow for only 32
+	 * devices per bus anyway.
+	 */
+	unsigned long long addresses;
+
 	/** Root hub */
 	struct usb_hub *hub;
 
@@ -816,6 +918,8 @@ struct usb_bus {
 	struct list_head hubs;
 	/** List of changed ports */
 	struct list_head changed;
+	/** List of halted endpoints */
+	struct list_head halted;
 	/** Process */
 	struct process process;
 
@@ -853,8 +957,10 @@ struct usb_host_operations {
 	struct usb_device_host_operations device;
 	/** Bus operations */
 	struct usb_bus_host_operations bus;
+	/** Hub operations */
+	struct usb_hub_host_operations hub;
 	/** Root hub operations */
-	struct usb_hub_driver_operations hub;
+	struct usb_hub_driver_operations root;
 };
 
 /**
@@ -961,6 +1067,19 @@ usb_set_feature ( struct usb_device *usb, unsigned int type,
 }
 
 /**
+ * Set address
+ *
+ * @v usb		USB device
+ * @v address		Device address
+ * @ret rc		Return status code
+ */
+static inline __attribute__ (( always_inline )) int
+usb_set_address ( struct usb_device *usb, unsigned int address ) {
+
+	return usb_control ( usb, USB_SET_ADDRESS, address, 0, NULL, 0 );
+}
+
+/**
  * Get USB descriptor
  *
  * @v usb		USB device
@@ -1034,13 +1153,13 @@ usb_get_config_descriptor ( struct usb_device *usb, unsigned int index,
  * Set USB configuration
  *
  * @v usb		USB device
- * @v config		Configuration value
+ * @v index		Configuration index
  * @ret rc		Return status code
  */
 static inline __attribute__ (( always_inline )) int
-usb_set_configuration ( struct usb_device *usb, unsigned int config ) {
+usb_set_configuration ( struct usb_device *usb, unsigned int index ) {
 
-	return usb_control ( usb, USB_SET_CONFIGURATION, config, 0, NULL, 0 );
+	return usb_control ( usb, USB_SET_CONFIGURATION, index, 0, NULL, 0 );
 }
 
 /**
@@ -1080,27 +1199,56 @@ extern void free_usb_hub ( struct usb_hub *hub );
 
 extern void usb_port_changed ( struct usb_port *port );
 
-extern struct usb_bus * alloc_usb_bus ( struct device *dev, unsigned int ports,
+extern struct usb_bus * alloc_usb_bus ( struct device *dev,
+					unsigned int ports, size_t mtu,
 					struct usb_host_operations *op );
 extern int register_usb_bus ( struct usb_bus *bus );
 extern void unregister_usb_bus ( struct usb_bus *bus );
 extern void free_usb_bus ( struct usb_bus *bus );
 
+extern int usb_alloc_address ( struct usb_bus *bus );
+extern void usb_free_address ( struct usb_bus *bus, unsigned int address );
 extern unsigned int usb_route_string ( struct usb_device *usb );
 extern unsigned int usb_depth ( struct usb_device *usb );
 extern struct usb_port * usb_root_hub_port ( struct usb_device *usb );
+extern struct usb_port * usb_transaction_translator ( struct usb_device *usb );
+
+/** Minimum reset time
+ *
+ * Section 7.1.7.5 of the USB2 specification states that root hub
+ * ports should assert reset signalling for at least 50ms.
+ */
+#define USB_RESET_DELAY_MS 50
+
+/** Reset recovery time
+ *
+ * Section 9.2.6.2 of the USB2 specification states that the
+ * "recovery" interval after a port reset is 10ms.
+ */
+#define USB_RESET_RECOVER_DELAY_MS 10
 
 /** Maximum time to wait for a control transaction to complete
  *
- * This is a policy decision.
+ * Section 9.2.6.1 of the USB2 specification states that the upper
+ * limit for commands to be processed is 5 seconds.
  */
-#define USB_CONTROL_MAX_WAIT_MS 100
+#define USB_CONTROL_MAX_WAIT_MS 5000
+
+/** Set address recovery time
+ *
+ * Section 9.2.6.3 of the USB2 specification states that devices are
+ * allowed a 2ms recovery interval after receiving a new address.
+ */
+#define USB_SET_ADDRESS_RECOVER_DELAY_MS 2
 
 /** Time to wait for ports to stabilise
  *
- * This is a policy decision.
+ * Section 7.1.7.3 of the USB specification states that we must allow
+ * 100ms for devices to signal attachment, and an additional 100ms for
+ * connection debouncing.  (This delay is parallelised across all
+ * ports on a hub; we do not delay separately for each port.)
  */
-#define USB_PORT_DELAY_MS 100
+#define USB_PORT_DELAY_MS 200
 
 /** A USB device ID */
 struct usb_device_id {

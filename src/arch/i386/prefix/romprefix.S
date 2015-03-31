@@ -6,9 +6,10 @@
  * table so using a noticeable amount of stack space is a no-no.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER )
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL )
 
 #include <config/general.h>
+#include <config/branding.h>
 
 #define PNP_SIGNATURE ( '$' + ( 'P' << 8 ) + ( 'n' << 16 ) + ( 'P' << 24 ) )
 #define PMM_SIGNATURE ( '$' + ( 'P' << 8 ) + ( 'M' << 16 ) + ( 'M' << 24 ) )
@@ -573,7 +574,7 @@ get_pmm_decompress_to:
  * Note to hardware vendors:
  *
  * If you wish to brand this boot ROM, please do so by defining the
- * strings PRODUCT_NAME and PRODUCT_SHORT_NAME in config/general.h.
+ * strings PRODUCT_NAME and PRODUCT_SHORT_NAME in config/branding.h.
  *
  * While nothing in the GPL prevents you from removing all references
  * to iPXE or http://ipxe.org, we prefer you not to do so.
@@ -589,7 +590,10 @@ init_message:
 	.ascii	"\n"
 	.ascii	PRODUCT_NAME
 	.ascii	"\n"
-	.asciz	"iPXE (http://ipxe.org)"
+	.ascii	PRODUCT_SHORT_NAME
+	.ascii	" ("
+	.ascii	PRODUCT_URI
+	.asciz	")"
 	.size	init_message, . - init_message
 .ifeqs	BUSTYPE, "PCIR"
 init_message_pci:
@@ -870,3 +874,9 @@ wait_for_tick:
 	popl	%eax
 	ret
 	.size wait_for_tick, . - wait_for_tick
+
+/* Drag in objects via _rom_start */
+REQUIRING_SYMBOL ( _rom_start )
+
+/* Drag in ROM configuration */
+REQUIRE_OBJECT ( config_romprefix )

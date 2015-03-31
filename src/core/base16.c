@@ -15,14 +15,19 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdint.h>
-#include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
+#include <assert.h>
+#include <ipxe/string.h>
 #include <ipxe/base16.h>
 
 /** @file
@@ -87,13 +92,13 @@ int hex_decode ( const char *encoded, char separator, void *data, size_t len ) {
 
 		/* Extract digits.  Note that either digit may be NUL,
 		 * which would be interpreted as an invalid value by
-		 * strtoul_charval(); there is therefore no need for an
+		 * digit_value(); there is therefore no need for an
 		 * explicit end-of-string check.
 		 */
-		sixteens = strtoul_charval ( *(encoded++) );
+		sixteens = digit_value ( *(encoded++) );
 		if ( sixteens >= 16 )
 			return -EINVAL;
-		units = strtoul_charval ( *(encoded++) );
+		units = digit_value ( *(encoded++) );
 		if ( units >= 16 )
 			return -EINVAL;
 

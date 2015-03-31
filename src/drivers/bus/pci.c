@@ -18,9 +18,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -58,8 +62,8 @@ static unsigned long pci_bar ( struct pci_device *pci, unsigned int reg ) {
 	uint32_t high;
 
 	pci_read_config_dword ( pci, reg, &low );
-	if ( ( low & (PCI_BASE_ADDRESS_SPACE|PCI_BASE_ADDRESS_MEM_TYPE_MASK) )
-	     == (PCI_BASE_ADDRESS_SPACE_MEMORY|PCI_BASE_ADDRESS_MEM_TYPE_64) ){
+	if ( ( low & (PCI_BASE_ADDRESS_SPACE_IO|PCI_BASE_ADDRESS_MEM_TYPE_MASK))
+	     == PCI_BASE_ADDRESS_MEM_TYPE_64 ) {
 		pci_read_config_dword ( pci, reg + 4, &high );
 		if ( high ) {
 			if ( sizeof ( unsigned long ) > sizeof ( uint32_t ) ) {
@@ -93,10 +97,10 @@ unsigned long pci_bar_start ( struct pci_device *pci, unsigned int reg ) {
 	unsigned long bar;
 
 	bar = pci_bar ( pci, reg );
-	if ( (bar & PCI_BASE_ADDRESS_SPACE) == PCI_BASE_ADDRESS_SPACE_MEMORY ){
-		return ( bar & PCI_BASE_ADDRESS_MEM_MASK );
+	if ( bar & PCI_BASE_ADDRESS_SPACE_IO ) {
+		return ( bar & ~PCI_BASE_ADDRESS_IO_MASK );
 	} else {
-		return ( bar & PCI_BASE_ADDRESS_IO_MASK );
+		return ( bar & ~PCI_BASE_ADDRESS_MEM_MASK );
 	}
 }
 
@@ -122,11 +126,11 @@ static void pci_read_bases ( struct pci_device *pci ) {
 		if ( bar & PCI_BASE_ADDRESS_SPACE_IO ) {
 			if ( ! pci->ioaddr )
 				pci->ioaddr = 
-					( bar & PCI_BASE_ADDRESS_IO_MASK );
+					( bar & ~PCI_BASE_ADDRESS_IO_MASK );
 		} else {
 			if ( ! pci->membase )
 				pci->membase =
-					( bar & PCI_BASE_ADDRESS_MEM_MASK );
+					( bar & ~PCI_BASE_ADDRESS_MEM_MASK );
 			/* Skip next BAR if 64-bit */
 			if ( bar & PCI_BASE_ADDRESS_MEM_TYPE_64 )
 				reg += 4;
@@ -181,7 +185,7 @@ int pci_read_config ( struct pci_device *pci ) {
 		pci->busdevfn = PCI_FIRST_FUNC ( pci->busdevfn );
 		pci_read_config_byte ( pci, PCI_HEADER_TYPE, &hdrtype );
 		pci->busdevfn = busdevfn;
-		if ( ! ( hdrtype & 0x80 ) )
+		if ( ! ( hdrtype & PCI_HEADER_TYPE_MULTI ) )
 			return -ENODEV;
 	}
 

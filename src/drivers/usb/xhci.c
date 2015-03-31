@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -30,6 +34,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <ipxe/umalloc.h>
 #include <ipxe/pci.h>
 #include <ipxe/usb.h>
+#include <ipxe/init.h>
 #include <ipxe/profile.h>
 #include "xhci.h"
 
@@ -517,6 +522,9 @@ static inline void xhci_dump_port ( struct xhci_device *xhci,
  ******************************************************************************
  */
 
+/** Prevent the release of ownership back to BIOS */
+static int xhci_legacy_prevent_release;
+
 /**
  * Initialise USB legacy support
  *
@@ -552,16 +560,15 @@ static void xhci_legacy_init ( struct xhci_device *xhci ) {
  * Claim ownership from BIOS
  *
  * @v xhci		xHCI device
- * @ret rc		Return status code
  */
-static int xhci_legacy_claim ( struct xhci_device *xhci ) {
+static void xhci_legacy_claim ( struct xhci_device *xhci ) {
 	uint32_t ctlsts;
 	uint8_t bios;
 	unsigned int i;
 
 	/* Do nothing unless legacy support capability is present */
 	if ( ! xhci->legacy )
-		return 0;
+		return;
 
 	/* Claim ownership */
 	writeb ( XHCI_USBLEGSUP_OS_OWNED,
@@ -581,16 +588,19 @@ static int xhci_legacy_claim ( struct xhci_device *xhci ) {
 				DBGC ( xhci, "XHCI %p warning: BIOS retained "
 				       "SMIs: %08x\n", xhci, ctlsts );
 			}
-			return 0;
+			return;
 		}
 
 		/* Delay */
 		mdelay ( 1 );
 	}
 
-	DBGC ( xhci, "XHCI %p timed out waiting for BIOS to release "
-	       "ownership\n", xhci );
-	return -ETIMEDOUT;
+	/* BIOS did not release ownership.  Claim it forcibly by
+	 * disabling all SMIs.
+	 */
+	DBGC ( xhci, "XHCI %p could not claim ownership from BIOS: forcibly "
+	       "disabling SMIs\n", xhci );
+	writel ( 0, xhci->cap + xhci->legacy + XHCI_USBLEGSUP_CTLSTS );
 }
 
 /**
@@ -603,6 +613,12 @@ static void xhci_legacy_release ( struct xhci_device *xhci ) {
 	/* Do nothing unless legacy support capability is present */
 	if ( ! xhci->legacy )
 		return;
+
+	/* Do nothing if releasing ownership is prevented */
+	if ( xhci_legacy_prevent_release ) {
+		DBGC ( xhci, "XHCI %p not releasing ownership to BIOS\n", xhci);
+		return;
+	}
 
 	/* Release ownership */
 	writeb ( 0, xhci->cap + xhci->legacy + XHCI_USBLEGSUP_OS );
@@ -1199,6 +1215,22 @@ static int xhci_ring_alloc ( struct xhci_device *xhci,
 }
 
 /**
+ * Reset transfer request block ring
+ *
+ * @v ring		TRB ring
+ */
+static void xhci_ring_reset ( struct xhci_trb_ring *ring ) {
+	unsigned int count = ( 1U << ring->shift );
+
+	/* Reset producer and consumer counters */
+	ring->prod = 0;
+	ring->cons = 0;
+
+	/* Reset TRBs (except Link TRB) */
+	memset ( ring->trb, 0, ( count * sizeof ( ring->trb[0] ) ) );
+}
+
+/**
  * Free transfer request block ring
  *
  * @v ring		TRB ring
@@ -1574,6 +1606,22 @@ static void xhci_transfer ( struct xhci_device *xhci,
  */
 static void xhci_complete ( struct xhci_device *xhci,
 			    struct xhci_trb_complete *complete ) {
+	int rc;
+
+	/* Ignore "command ring stopped" notifications */
+	if ( complete->code == XHCI_CMPLT_CMD_STOPPED ) {
+		DBGC2 ( xhci, "XHCI %p command ring stopped\n", xhci );
+		return;
+	}
+
+	/* Ignore unexpected completions */
+	if ( ! xhci->pending ) {
+		rc = -ECODE ( complete->code );
+		DBGC ( xhci, "XHCI %p unexpected completion (code %d): %s\n",
+		       xhci, complete->code, strerror ( rc ) );
+		DBGC_HDA ( xhci, 0, complete, sizeof ( *complete ) );
+		return;
+	}
 
 	/* Dequeue command TRB */
 	xhci_dequeue ( &xhci->command );
@@ -1582,15 +1630,9 @@ static void xhci_complete ( struct xhci_device *xhci,
 	assert ( xhci_ring_consumed ( &xhci->command ) ==
 		 le64_to_cpu ( complete->command ) );
 
-	/* Record completion if applicable */
-	if ( xhci->completion ) {
-		memcpy ( xhci->completion, complete,
-			 sizeof ( *xhci->completion ) );
-		xhci->completion = NULL;
-	} else {
-		DBGC ( xhci, "XHCI %p unexpected completion:\n", xhci );
-		DBGC_HDA ( xhci, 0, complete, sizeof ( *complete ) );
-	}
+	/* Record completion */
+	memcpy ( xhci->pending, complete, sizeof ( *xhci->pending ) );
+	xhci->pending = NULL;
 }
 
 /**
@@ -1697,6 +1739,33 @@ static void xhci_event_poll ( struct xhci_device *xhci ) {
 }
 
 /**
+ * Abort command
+ *
+ * @v xhci		xHCI device
+ */
+static void xhci_abort ( struct xhci_device *xhci ) {
+	physaddr_t crp;
+
+	/* Abort the command */
+	DBGC2 ( xhci, "XHCI %p aborting command\n", xhci );
+	xhci_writeq ( xhci, XHCI_CRCR_CA, xhci->op + XHCI_OP_CRCR );
+
+	/* Allow time for command to abort */
+	mdelay ( XHCI_COMMAND_ABORT_DELAY_MS );
+
+	/* Sanity check */
+	assert ( ( readl ( xhci->op + XHCI_OP_CRCR ) & XHCI_CRCR_CRR ) == 0 );
+
+	/* Consume (and ignore) any final command status */
+	xhci_event_poll ( xhci );
+
+	/* Reset the command ring control register */
+	xhci_ring_reset ( &xhci->command );
+	crp = virt_to_phys ( xhci->command.trb );
+	xhci_writeq ( xhci, ( crp | XHCI_CRCR_RCS ), xhci->op + XHCI_OP_CRCR );
+}
+
+/**
  * Issue command and wait for completion
  *
  * @v xhci		xHCI device
@@ -1711,8 +1780,8 @@ static int xhci_command ( struct xhci_device *xhci, union xhci_trb *trb ) {
 	unsigned int i;
 	int rc;
 
-	/* Record the completion buffer */
-	xhci->completion = trb;
+	/* Record the pending command */
+	xhci->pending = trb;
 
 	/* Enqueue the command */
 	if ( ( rc = xhci_enqueue ( &xhci->command, NULL, trb ) ) != 0 )
@@ -1728,7 +1797,7 @@ static int xhci_command ( struct xhci_device *xhci, union xhci_trb *trb ) {
 		xhci_event_poll ( xhci );
 
 		/* Check for completion */
-		if ( ! xhci->completion ) {
+		if ( ! xhci->pending ) {
 			if ( complete->code != XHCI_CMPLT_SUCCESS ) {
 				rc = -ECODE ( complete->code );
 				DBGC ( xhci, "XHCI %p command failed (code "
@@ -1748,8 +1817,11 @@ static int xhci_command ( struct xhci_device *xhci, union xhci_trb *trb ) {
 	DBGC ( xhci, "XHCI %p timed out waiting for completion\n", xhci );
 	rc = -ETIMEDOUT;
 
+	/* Abort command */
+	xhci_abort ( xhci );
+
  err_enqueue:
-	xhci->completion = NULL;
+	xhci->pending = NULL;
 	return rc;
 }
 
@@ -1918,6 +1990,8 @@ static void xhci_address_device_input ( struct xhci_device *xhci,
 	slot_ctx->info = cpu_to_le32 ( XHCI_SLOT_INFO ( 1, 0, slot->psiv,
 							slot->route ) );
 	slot_ctx->port = slot->port;
+	slot_ctx->tt_id = slot->tt_id;
+	slot_ctx->tt_port = slot->tt_port;
 
 	/* Populate control endpoint context */
 	ep_ctx = ( input + xhci_input_context_offset ( xhci, XHCI_CTX_EP0 ) );
@@ -1967,7 +2041,7 @@ static inline int xhci_address_device ( struct xhci_device *xhci,
  * @v input		Input context
  */
 static void xhci_configure_endpoint_input ( struct xhci_device *xhci,
-					    struct xhci_slot *slot __unused,
+					    struct xhci_slot *slot,
 					    struct xhci_endpoint *endpoint,
 					    void *input ) {
 	struct xhci_control_context *control_ctx;
@@ -1982,10 +2056,13 @@ static void xhci_configure_endpoint_input ( struct xhci_device *xhci,
 	/* Populate slot context */
 	slot_ctx = ( input + xhci_input_context_offset ( xhci, XHCI_CTX_SLOT ));
 	slot_ctx->info = cpu_to_le32 ( XHCI_SLOT_INFO ( ( XHCI_CTX_END - 1 ),
-							0, 0, 0 ) );
+							( slot->ports ? 1 : 0 ),
+							slot->psiv, 0 ) );
+	slot_ctx->ports = slot->ports;
 
 	/* Populate endpoint context */
 	ep_ctx = ( input + xhci_input_context_offset ( xhci, endpoint->ctx ) );
+	ep_ctx->interval = endpoint->interval;
 	ep_ctx->type = endpoint->type;
 	ep_ctx->burst = endpoint->ep->burst;
 	ep_ctx->mtu = cpu_to_le16 ( endpoint->ep->mtu );
@@ -2252,6 +2329,7 @@ static int xhci_endpoint_open ( struct usb_endpoint *ep ) {
 	struct xhci_endpoint *endpoint;
 	unsigned int ctx;
 	unsigned int type;
+	unsigned int interval;
 	int rc;
 
 	/* Calculate context index */
@@ -2264,6 +2342,13 @@ static int xhci_endpoint_open ( struct usb_endpoint *ep ) {
 		type = XHCI_EP_TYPE_CONTROL;
 	if ( ep->address & USB_DIR_IN )
 		type |= XHCI_EP_TYPE_IN;
+
+	/* Calculate interval */
+	if ( type & XHCI_EP_TYPE_PERIODIC ) {
+		interval = ( fls ( ep->interval ) - 1 );
+	} else {
+		interval = ep->interval;
+	}
 
 	/* Allocate and initialise structure */
 	endpoint = zalloc ( sizeof ( *endpoint ) );
@@ -2278,6 +2363,7 @@ static int xhci_endpoint_open ( struct usb_endpoint *ep ) {
 	endpoint->ep = ep;
 	endpoint->ctx = ctx;
 	endpoint->type = type;
+	endpoint->interval = interval;
 	endpoint->context = ( ( ( void * ) slot->context ) +
 			      xhci_device_context_offset ( xhci, ctx ) );
 
@@ -2354,6 +2440,9 @@ static int xhci_endpoint_reset ( struct usb_endpoint *ep ) {
 	/* Set transfer ring dequeue pointer */
 	if ( ( rc = xhci_set_tr_dequeue_pointer ( xhci, slot, endpoint ) ) != 0)
 		return rc;
+
+	/* Ring doorbell to resume processing */
+	xhci_doorbell ( &endpoint->ring );
 
 	DBGC ( xhci, "XHCI %p slot %d ctx %d reset\n",
 	       xhci, slot->id, endpoint->ctx );
@@ -2447,27 +2536,37 @@ static int xhci_endpoint_message ( struct usb_endpoint *ep,
  *
  * @v ep		USB endpoint
  * @v iobuf		I/O buffer
+ * @v terminate		Terminate using a short packet
  * @ret rc		Return status code
  */
 static int xhci_endpoint_stream ( struct usb_endpoint *ep,
-				  struct io_buffer *iobuf ) {
+				  struct io_buffer *iobuf, int terminate ) {
 	struct xhci_endpoint *endpoint = usb_endpoint_get_hostdata ( ep );
-	union xhci_trb trb;
+	union xhci_trb trbs[ 1 /* Normal */ + 1 /* Possible zero-length */ ];
+	union xhci_trb *trb = trbs;
 	struct xhci_trb_normal *normal;
+	size_t len = iob_len ( iobuf );
 	int rc;
 
 	/* Profile stream transfers */
 	profile_start ( &xhci_stream_profiler );
 
 	/* Construct normal TRBs */
-	normal = &trb.normal;
+	memset ( &trbs, 0, sizeof ( trbs ) );
+	normal = &(trb++)->normal;
 	normal->data = cpu_to_le64 ( virt_to_phys ( iobuf->data ) );
-	normal->len = cpu_to_le32 ( iob_len ( iobuf ) );
-	normal->flags = XHCI_TRB_IOC;
+	normal->len = cpu_to_le32 ( len );
 	normal->type = XHCI_TRB_NORMAL;
+	if ( terminate && ( ( len & ( ep->mtu - 1 ) ) == 0 ) ) {
+		normal->flags = XHCI_TRB_CH;
+		normal = &(trb++)->normal;
+		normal->type = XHCI_TRB_NORMAL;
+	}
+	normal->flags = XHCI_TRB_IOC;
 
 	/* Enqueue TRBs */
-	if ( ( rc = xhci_enqueue ( &endpoint->ring, iobuf, &trb ) ) != 0 )
+	if ( ( rc = xhci_enqueue_multi ( &endpoint->ring, iobuf, trbs,
+					 ( trb - trbs ) ) ) != 0 )
 		return rc;
 
 	/* Ring the doorbell */
@@ -2492,7 +2591,9 @@ static int xhci_endpoint_stream ( struct usb_endpoint *ep,
  */
 static int xhci_device_open ( struct usb_device *usb ) {
 	struct xhci_device *xhci = usb_bus_get_hostdata ( usb->port->hub->bus );
+	struct usb_port *tt = usb_transaction_translator ( usb );
 	struct xhci_slot *slot;
+	struct xhci_slot *tt_slot;
 	size_t len;
 	int type;
 	int id;
@@ -2526,6 +2627,11 @@ static int xhci_device_open ( struct usb_device *usb ) {
 	slot->xhci = xhci;
 	slot->usb = usb;
 	slot->id = id;
+	if ( tt ) {
+		tt_slot = usb_get_hostdata ( tt->hub->usb );
+		slot->tt_id = tt_slot->id;
+		slot->tt_port = tt->address;
+	}
 
 	/* Allocate a device context */
 	len = xhci_device_context_offset ( xhci, XHCI_CTX_END );
@@ -2567,13 +2673,28 @@ static void xhci_device_close ( struct usb_device *usb ) {
 	struct xhci_device *xhci = slot->xhci;
 	size_t len = xhci_device_context_offset ( xhci, XHCI_CTX_END );
 	unsigned int id = slot->id;
+	int rc;
 
 	/* Disable slot */
-	xhci_disable_slot ( xhci, id );
+	if ( ( rc = xhci_disable_slot ( xhci, id ) ) != 0 ) {
+		/* Slot is still enabled.  Leak the slot context,
+		 * since the controller may still write to this
+		 * memory, and leave the DCBAA entry intact.
+		 *
+		 * If the controller later reports that this same slot
+		 * has been re-enabled, then some assertions will be
+		 * triggered.
+		 */
+		DBGC ( xhci, "XHCI %p slot %d leaking context memory\n",
+		      xhci, slot->id );
+		slot->context = NULL;
+	}
 
 	/* Free slot */
-	free_dma ( slot->context, len );
-	xhci->dcbaa[id] = 0;
+	if ( slot->context ) {
+		free_dma ( slot->context, len );
+		xhci->dcbaa[id] = 0;
+	}
 	xhci->slot[id] = NULL;
 	free ( slot );
 }
@@ -2709,6 +2830,51 @@ static void xhci_bus_poll ( struct usb_bus *bus ) {
 
 /******************************************************************************
  *
+ * Hub operations
+ *
+ ******************************************************************************
+ */
+
+/**
+ * Open hub
+ *
+ * @v hub		USB hub
+ * @ret rc		Return status code
+ */
+static int xhci_hub_open ( struct usb_hub *hub ) {
+	struct xhci_slot *slot;
+
+	/* Do nothing if this is the root hub */
+	if ( ! hub->usb )
+		return 0;
+
+	/* Get device slot */
+	slot = usb_get_hostdata ( hub->usb );
+
+	/* Update device slot hub parameters.  We don't inform the
+	 * hardware of this information until the hub's interrupt
+	 * endpoint is opened, since the only mechanism for so doing
+	 * provided by the xHCI specification is a Configure Endpoint
+	 * command, and we can't issue that command until we have a
+	 * non-EP0 endpoint to configure.
+	 */
+	slot->ports = hub->ports;
+
+	return 0;
+}
+
+/**
+ * Close hub
+ *
+ * @v hub		USB hub
+ */
+static void xhci_hub_close ( struct usb_hub *hub __unused ) {
+
+	/* Nothing to do */
+}
+
+/******************************************************************************
+ *
  * Root hub operations
  *
  ******************************************************************************
@@ -2720,7 +2886,7 @@ static void xhci_bus_poll ( struct usb_bus *bus ) {
  * @v hub		USB hub
  * @ret rc		Return status code
  */
-static int xhci_hub_open ( struct usb_hub *hub ) {
+static int xhci_root_open ( struct usb_hub *hub ) {
 	struct usb_bus *bus = hub->bus;
 	struct xhci_device *xhci = usb_bus_get_hostdata ( bus );
 	struct usb_port *port;
@@ -2754,6 +2920,11 @@ static int xhci_hub_open ( struct usb_hub *hub ) {
 		}
 	}
 
+	/* Some xHCI cards seem to require an additional delay after
+	 * setting the link state to RxDetect.
+	 */
+	mdelay ( XHCI_LINK_STATE_DELAY_MS );
+
 	/* Record hub driver private data */
 	usb_hub_set_drvdata ( hub, xhci );
 
@@ -2765,7 +2936,7 @@ static int xhci_hub_open ( struct usb_hub *hub ) {
  *
  * @v hub		USB hub
  */
-static void xhci_hub_close ( struct usb_hub *hub ) {
+static void xhci_root_close ( struct usb_hub *hub ) {
 
 	/* Clear hub driver private data */
 	usb_hub_set_drvdata ( hub, NULL );
@@ -2778,7 +2949,7 @@ static void xhci_hub_close ( struct usb_hub *hub ) {
  * @v port		USB port
  * @ret rc		Return status code
  */
-static int xhci_hub_enable ( struct usb_hub *hub, struct usb_port *port ) {
+static int xhci_root_enable ( struct usb_hub *hub, struct usb_port *port ) {
 	struct xhci_device *xhci = usb_hub_get_drvdata ( hub );
 	uint32_t portsc;
 	unsigned int i;
@@ -2815,7 +2986,7 @@ static int xhci_hub_enable ( struct usb_hub *hub, struct usb_port *port ) {
  * @v port		USB port
  * @ret rc		Return status code
  */
-static int xhci_hub_disable ( struct usb_hub *hub, struct usb_port *port ) {
+static int xhci_root_disable ( struct usb_hub *hub, struct usb_port *port ) {
 	struct xhci_device *xhci = usb_hub_get_drvdata ( hub );
 	uint32_t portsc;
 
@@ -2835,7 +3006,7 @@ static int xhci_hub_disable ( struct usb_hub *hub, struct usb_port *port ) {
  * @v port		USB port
  * @ret rc		Return status code
  */
-static int xhci_hub_speed ( struct usb_hub *hub, struct usb_port *port ) {
+static int xhci_root_speed ( struct usb_hub *hub, struct usb_port *port ) {
 	struct xhci_device *xhci = usb_hub_get_drvdata ( hub );
 	uint32_t portsc;
 	unsigned int psiv;
@@ -2877,6 +3048,25 @@ static int xhci_hub_speed ( struct usb_hub *hub, struct usb_port *port ) {
 	return 0;
 }
 
+/**
+ * Clear transaction translator buffer
+ *
+ * @v hub		USB hub
+ * @v port		USB port
+ * @v ep		USB endpoint
+ * @ret rc		Return status code
+ */
+static int xhci_root_clear_tt ( struct usb_hub *hub, struct usb_port *port,
+				struct usb_endpoint *ep ) {
+	struct ehci_device *ehci = usb_hub_get_drvdata ( hub );
+
+	/* Should never be called; this is a root hub */
+	DBGC ( ehci, "XHCI %p port %d nonsensical CLEAR_TT for %s endpoint "
+	       "%02x\n", ehci, port->address, ep->usb->name, ep->address );
+
+	return -ENOTSUP;
+}
+
 /******************************************************************************
  *
  * PCI interface
@@ -2907,11 +3097,70 @@ static struct usb_host_operations xhci_operations = {
 	.hub = {
 		.open = xhci_hub_open,
 		.close = xhci_hub_close,
-		.enable = xhci_hub_enable,
-		.disable = xhci_hub_disable,
-		.speed = xhci_hub_speed,
+	},
+	.root = {
+		.open = xhci_root_open,
+		.close = xhci_root_close,
+		.enable = xhci_root_enable,
+		.disable = xhci_root_disable,
+		.speed = xhci_root_speed,
+		.clear_tt = xhci_root_clear_tt,
 	},
 };
+
+/**
+ * Fix Intel PCH-specific quirks
+ *
+ * @v xhci		xHCI device
+ * @v pci		PCI device
+ */
+static void xhci_pch_fix ( struct xhci_device *xhci, struct pci_device *pci ) {
+	struct xhci_pch *pch = &xhci->pch;
+	uint32_t xusb2pr;
+	uint32_t xusb2prm;
+	uint32_t usb3pssen;
+	uint32_t usb3prm;
+
+	/* Enable SuperSpeed capability.  Do this before rerouting
+	 * USB2 ports, so that USB3 devices connect at SuperSpeed.
+	 */
+	pci_read_config_dword ( pci, XHCI_PCH_USB3PSSEN, &usb3pssen );
+	pci_read_config_dword ( pci, XHCI_PCH_USB3PRM, &usb3prm );
+	if ( usb3prm & ~usb3pssen ) {
+		DBGC ( xhci, "XHCI %p enabling SuperSpeed on ports %08x\n",
+		       xhci, ( usb3prm & ~usb3pssen ) );
+	}
+	pch->usb3pssen = usb3pssen;
+	usb3pssen |= usb3prm;
+	pci_write_config_dword ( pci, XHCI_PCH_USB3PSSEN, usb3pssen );
+
+	/* Route USB2 ports from EHCI to xHCI */
+	pci_read_config_dword ( pci, XHCI_PCH_XUSB2PR, &xusb2pr );
+	pci_read_config_dword ( pci, XHCI_PCH_XUSB2PRM, &xusb2prm );
+	if ( xusb2prm & ~xusb2pr ) {
+		DBGC ( xhci, "XHCI %p routing ports %08x from EHCI to xHCI\n",
+		       xhci, ( xusb2prm & ~xusb2pr ) );
+	}
+	pch->xusb2pr = xusb2pr;
+	xusb2pr |= xusb2prm;
+	pci_write_config_dword ( pci, XHCI_PCH_XUSB2PR, xusb2pr );
+}
+
+/**
+ * Undo Intel PCH-specific quirk fixes
+ *
+ * @v xhci		xHCI device
+ * @v pci		PCI device
+ */
+static void xhci_pch_undo ( struct xhci_device *xhci, struct pci_device *pci ) {
+	struct xhci_pch *pch = &xhci->pch;
+
+	/* Restore USB2 port routing to original state */
+	pci_write_config_dword ( pci, XHCI_PCH_XUSB2PR, pch->xusb2pr );
+
+	/* Restore SuperSpeed capability to original state */
+	pci_write_config_dword ( pci, XHCI_PCH_USB3PSSEN, pch->usb3pssen );
+}
 
 /**
  * Probe PCI device
@@ -2951,15 +3200,18 @@ static int xhci_probe ( struct pci_device *pci ) {
 
 	/* Initialise USB legacy support and claim ownership */
 	xhci_legacy_init ( xhci );
-	if ( ( rc = xhci_legacy_claim ( xhci ) ) != 0 )
-		goto err_legacy_claim;
+	xhci_legacy_claim ( xhci );
+
+	/* Fix Intel PCH-specific quirks, if applicable */
+	if ( pci->id->driver_data & XHCI_PCH )
+		xhci_pch_fix ( xhci, pci );
 
 	/* Reset device */
 	if ( ( rc = xhci_reset ( xhci ) ) != 0 )
 		goto err_reset;
 
 	/* Allocate USB bus */
-	xhci->bus = alloc_usb_bus ( &pci->dev, xhci->ports,
+	xhci->bus = alloc_usb_bus ( &pci->dev, xhci->ports, XHCI_MTU,
 				    &xhci_operations );
 	if ( ! xhci->bus ) {
 		rc = -ENOMEM;
@@ -2987,8 +3239,9 @@ static int xhci_probe ( struct pci_device *pci ) {
  err_alloc_bus:
 	xhci_reset ( xhci );
  err_reset:
+	if ( pci->id->driver_data & XHCI_PCH )
+		xhci_pch_undo ( xhci, pci );
 	xhci_legacy_release ( xhci );
- err_legacy_claim:
 	iounmap ( xhci->regs );
  err_ioremap:
 	free ( xhci );
@@ -3008,6 +3261,8 @@ static void xhci_remove ( struct pci_device *pci ) {
 	unregister_usb_bus ( bus );
 	free_usb_bus ( bus );
 	xhci_reset ( xhci );
+	if ( pci->id->driver_data & XHCI_PCH )
+		xhci_pch_undo ( xhci, pci );
 	xhci_legacy_release ( xhci );
 	iounmap ( xhci->regs );
 	free ( xhci );
@@ -3015,6 +3270,7 @@ static void xhci_remove ( struct pci_device *pci ) {
 
 /** XHCI PCI device IDs */
 static struct pci_device_id xhci_ids[] = {
+	PCI_ROM ( 0x8086, 0xffff, "xhci-pch", "xHCI (Intel PCH)", XHCI_PCH ),
 	PCI_ROM ( 0xffff, 0xffff, "xhci", "xHCI", 0 ),
 };
 
@@ -3026,4 +3282,21 @@ struct pci_driver xhci_driver __pci_driver = {
 			     PCI_CLASS_SERIAL_USB_XHCI ),
 	.probe = xhci_probe,
 	.remove = xhci_remove,
+};
+
+/**
+ * Prepare for exit
+ *
+ * @v booting		System is shutting down for OS boot
+ */
+static void xhci_shutdown ( int booting ) {
+	/* If we are shutting down to boot an OS, then prevent the
+	 * release of ownership back to BIOS.
+	 */
+	xhci_legacy_prevent_release = booting;
+}
+
+/** Startup/shutdown function */
+struct startup_fn xhci_startup __startup_fn ( STARTUP_LATE ) = {
+	.shutdown = xhci_shutdown,
 };

@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
@@ -150,6 +154,8 @@ static int hv_check_hv ( struct hv_hypervisor *hv ) {
 	uint32_t discard_ebx;
 	uint32_t discard_ecx;
 	uint32_t discard_edx;
+	uint32_t available;
+	uint32_t permissions;
 
 	/* Check for presence of a hypervisor (not necessarily Hyper-V) */
 	x86_features ( &features );
@@ -165,6 +171,30 @@ static int hv_check_hv ( struct hv_hypervisor *hv ) {
 		DBGC ( hv, "HV %p not running in Hyper-V (interface ID "
 		       "%#08x)\n", hv, interface_id );
 		return -ENODEV;
+	}
+
+	/* Check that required features and privileges are available */
+	cpuid ( HV_CPUID_FEATURES, &available, &permissions, &discard_ecx,
+		&discard_edx );
+	if ( ! ( available & HV_FEATURES_AVAIL_HYPERCALL_MSR ) ) {
+		DBGC ( hv, "HV %p has no hypercall MSRs (features %08x:%08x)\n",
+		       hv, available, permissions );
+		return -ENODEV;
+	}
+	if ( ! ( available & HV_FEATURES_AVAIL_SYNIC_MSR ) ) {
+		DBGC ( hv, "HV %p has no SynIC MSRs (features %08x:%08x)\n",
+		       hv, available, permissions );
+		return -ENODEV;
+	}
+	if ( ! ( permissions & HV_FEATURES_PERM_POST_MESSAGES ) ) {
+		DBGC ( hv, "HV %p cannot post messages (features %08x:%08x)\n",
+		       hv, available, permissions );
+		return -EACCES;
+	}
+	if ( ! ( permissions & HV_FEATURES_PERM_SIGNAL_EVENTS ) ) {
+		DBGC ( hv, "HV %p cannot signal events (features %08x:%08x)",
+		       hv, available, permissions );
+		return -EACCES;
 	}
 
 	return 0;
@@ -559,6 +589,9 @@ struct root_device hv_root_device __root_device = {
 	.dev = { .name = "Hyper-V" },
 	.driver = &hv_root_driver,
 };
+
+/* Drag in objects via hv_root_device */
+REQUIRING_SYMBOL ( hv_root_device );
 
 /* Drag in netvsc driver */
 REQUIRE_OBJECT ( netvsc );

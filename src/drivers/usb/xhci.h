@@ -7,7 +7,7 @@
  *
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <assert.h>
 #include <ipxe/pci.h>
@@ -23,6 +23,9 @@ FILE_LICENCE ( GPL2_OR_LATER );
  * size, with a minimum of a 64 byte alignment.
  */
 #define XHCI_MIN_ALIGN 64
+
+/** Maximum transfer size */
+#define XHCI_MTU 65536
 
 /** xHCI PCI BAR */
 #define XHCI_BAR PCI_BASE_ADDRESS_0
@@ -178,6 +181,9 @@ enum xhci_default_psi_value {
 /** Command ring cycle state */
 #define XHCI_CRCR_RCS 0x00000001UL
 
+/** Command abort */
+#define XHCI_CRCR_CA 0x00000004UL
+
 /** Command ring running */
 #define XHCI_CRCR_CRR 0x00000008UL
 
@@ -235,6 +241,9 @@ enum xhci_default_psi_value {
 
 /** Port link state write strobe */
 #define XHCI_PORTSC_LWS 0x00010000UL
+
+/** Time to delay after writing the port link state */
+#define XHCI_LINK_STATE_DELAY_MS 20
 
 /** Connect status change */
 #define XHCI_PORTSC_CSC 0x00020000UL
@@ -626,6 +635,8 @@ enum xhci_completion_code {
 	XHCI_CMPLT_SUCCESS = 1,
 	/** Short packet */
 	XHCI_CMPLT_SHORT = 13,
+	/** Command ring stopped */
+	XHCI_CMPLT_CMD_STOPPED = 24,
 };
 
 /** A port status change transfer request block */
@@ -806,6 +817,9 @@ enum xhci_endpoint_state {
 /** Input endpoint type */
 #define XHCI_EP_TYPE_IN XHCI_EP_TYPE ( 4 )
 
+/** Periodic endpoint type */
+#define XHCI_EP_TYPE_PERIODIC XHCI_EP_TYPE ( 1 )
+
 /** Endpoint dequeue cycle state */
 #define XHCI_EP_DCS 0x00000001UL
 
@@ -977,15 +991,46 @@ xhci_ring_consumed ( struct xhci_trb_ring *ring ) {
 
 /** Maximum time to wait for a command to complete
  *
- * This is a policy decision.
+ * The "address device" command involves waiting for a response to a
+ * USB control transaction, and so we must wait for up to the 5000ms
+ * that USB allows for devices to respond to control transactions.
  */
-#define XHCI_COMMAND_MAX_WAIT_MS 500
+#define XHCI_COMMAND_MAX_WAIT_MS USB_CONTROL_MAX_WAIT_MS
+
+/** Time to delay after aborting a command
+ *
+ * This is a policy decision
+ */
+#define XHCI_COMMAND_ABORT_DELAY_MS 500
 
 /** Maximum time to wait for a port reset to complete
  *
  * This is a policy decision.
  */
 #define XHCI_PORT_RESET_MAX_WAIT_MS 500
+
+/** Intel PCH quirk */
+struct xhci_pch {
+	/** USB2 port routing register original value */
+	uint32_t xusb2pr;
+	/** USB3 port SuperSpeed enable register original value */
+	uint32_t usb3pssen;
+};
+
+/** Intel PCH quirk flag */
+#define XHCI_PCH 0x0001
+
+/** Intel PCH USB2 port routing register */
+#define XHCI_PCH_XUSB2PR 0xd0
+
+/** Intel PCH USB2 port routing mask register */
+#define XHCI_PCH_XUSB2PRM 0xd4
+
+/** Intel PCH SuperSpeed enable register */
+#define XHCI_PCH_USB3PSSEN 0xd8
+
+/** Intel PCH USB3 port routing mask register */
+#define XHCI_PCH_USB3PRM 0xdc
 
 /** An xHCI device */
 struct xhci_device {
@@ -1036,14 +1081,17 @@ struct xhci_device {
 	struct xhci_trb_ring command;
 	/** Event ring */
 	struct xhci_event_ring event;
-	/** Current command completion buffer (if any) */
-	union xhci_trb *completion;
+	/** Current command (if any) */
+	union xhci_trb *pending;
 
 	/** Device slots, indexed by slot ID */
 	struct xhci_slot **slot;
 
 	/** USB bus */
 	struct usb_bus *bus;
+
+	/** Intel PCH quirk */
+	struct xhci_pch pch;
 };
 
 /** An xHCI device slot */
@@ -1062,6 +1110,12 @@ struct xhci_slot {
 	unsigned int port;
 	/** Protocol speed ID */
 	unsigned int psiv;
+	/** Number of ports (if this device is a hub) */
+	unsigned int ports;
+	/** Transaction translator slot ID */
+	unsigned int tt_id;
+	/** Transaction translator port */
+	unsigned int tt_port;
 	/** Endpoints, indexed by context ID */
 	struct xhci_endpoint *endpoint[XHCI_CTX_END];
 };
@@ -1078,6 +1132,8 @@ struct xhci_endpoint {
 	unsigned int ctx;
 	/** Endpoint type */
 	unsigned int type;
+	/** Endpoint interval */
+	unsigned int interval;
 	/** Endpoint context */
 	struct xhci_endpoint_context *context;
 	/** Transfer ring */

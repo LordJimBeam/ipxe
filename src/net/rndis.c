@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 /** @file
  *
@@ -791,6 +795,21 @@ void rndis_rx ( struct rndis_device *rndis, struct io_buffer *iobuf ) {
 	return;
 
  drop:
+	/* Record error */
+	netdev_rx_err ( netdev, iob_disown ( iobuf ), rc );
+}
+
+/**
+ * Discard packet from underlying transport layer
+ *
+ * @v rndis		RNDIS device
+ * @v iobuf		I/O buffer
+ * @v rc		Packet status code
+ */
+void rndis_rx_err ( struct rndis_device *rndis, struct io_buffer *iobuf,
+		    int rc ) {
+	struct net_device *netdev = rndis->netdev;
+
 	/* Record error */
 	netdev_rx_err ( netdev, iob_disown ( iobuf ), rc );
 }

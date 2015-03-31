@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <stdlib.h>
 #include <string.h>
@@ -1760,6 +1764,9 @@ int x509_validate_chain ( struct x509_chain *chain, time_t time,
 	DBGC ( chain, "X509 chain %p found no usable certificates\n", chain );
 	return -EACCES_USELESS;
 }
+
+/* Drag in objects via x509_validate() */
+REQUIRING_SYMBOL ( x509_validate );
 
 /* Drag in certificate store */
 REQUIRE_OBJECT ( certstore );

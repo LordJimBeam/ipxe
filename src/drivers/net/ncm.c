@@ -15,9 +15,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
+ *
+ * You can also choose to distribute this program under the terms of
+ * the Unmodified Binary Distribution Licence (as given in the file
+ * COPYING.UBDL), provided that you have satisfied its requirements.
  */
 
-FILE_LICENCE ( GPL2_OR_LATER );
+FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 
 #include <string.h>
 #include <errno.h>
@@ -26,6 +30,7 @@ FILE_LICENCE ( GPL2_OR_LATER );
 #include <ipxe/if_ether.h>
 #include <ipxe/profile.h>
 #include <ipxe/usb.h>
+#include <ipxe/usbnet.h>
 #include "ecm.h"
 #include "ncm.h"
 
@@ -34,10 +39,6 @@ FILE_LICENCE ( GPL2_OR_LATER );
  * CDC-NCM USB Ethernet driver
  *
  */
-
-/** Ring refill profiler */
-static struct profiler ncm_refill_profiler __profiler =
-	{ .name = "ncm.refill" };
 
 /** Interrupt completion profiler */
 static struct profiler ncm_intr_profiler __profiler =
@@ -57,144 +58,6 @@ static struct profiler ncm_out_profiler __profiler =
 
 /******************************************************************************
  *
- * Ring management
- *
- ******************************************************************************
- */
-
-/**
- * Transcribe receive ring name (for debugging)
- *
- * @v ncm		CDC-NCM device
- * @v ring		Receive ring
- * @ret name		Receive ring name
- */
-static inline const char * ncm_rx_name ( struct ncm_device *ncm,
-					 struct ncm_rx_ring *ring ) {
-	if ( ring == &ncm->intr ) {
-		return "interrupt";
-	} else if ( ring == &ncm->in ) {
-		return "bulk IN";
-	} else {
-		return "UNKNOWN";
-	}
-}
-
-/**
- * Allocate receive ring buffers
- *
- * @v ncm		CDC-NCM device
- * @v ring		Receive ring
- * @v mtu		I/O buffer size
- * @v count		Number of I/O buffers
- * @ret rc		Return status code
- */
-static int ncm_rx_alloc ( struct ncm_device *ncm, struct ncm_rx_ring *ring,
-			  size_t mtu, unsigned int count ) {
-	struct io_buffer *iobuf;
-	struct io_buffer *tmp;
-	unsigned int i;
-	int rc;
-
-	/* Initialise ring */
-	ring->mtu = mtu;
-	INIT_LIST_HEAD ( &ring->list );
-
-	/* Allocate I/O buffers */
-	for ( i = 0 ; i < count ; i++ ) {
-		iobuf = alloc_iob ( mtu );
-		if ( ! iobuf ) {
-			DBGC ( ncm, "NCM %p could not allocate %dx %zd-byte "
-			       "buffers for %s\n", ncm, count, mtu,
-			       ncm_rx_name ( ncm, ring ) );
-			rc = -ENOMEM;
-			goto err_alloc;
-		}
-		list_add ( &iobuf->list, &ring->list );
-	}
-
-	return 0;
-
- err_alloc:
-	list_for_each_entry_safe ( iobuf, tmp, &ring->list, list ) {
-		list_del ( &iobuf->list );
-		free_iob ( iobuf );
-	}
-	return rc;
-}
-
-/**
- * Refill receive ring
- *
- * @v ncm		CDC-NCM device
- * @v ring		Receive ring
- * @ret rc		Return status code
- */
-static int ncm_rx_refill ( struct ncm_device *ncm, struct ncm_rx_ring *ring ) {
-	struct io_buffer *iobuf;
-	int rc;
-
-	/* Enqueue any recycled I/O buffers */
-	while ( ( iobuf = list_first_entry ( &ring->list, struct io_buffer,
-					     list ) ) ) {
-
-		/* Profile refill */
-		profile_start ( &ncm_refill_profiler );
-
-		/* Reset size */
-		iob_put ( iobuf, ( ring->mtu - iob_len ( iobuf ) ) );
-
-		/* Enqueue I/O buffer */
-		if ( ( rc = usb_stream ( &ring->ep, iobuf ) ) != 0 ) {
-			DBGC ( ncm, "NCM %p could not enqueue %s: %s\n", ncm,
-			       ncm_rx_name ( ncm, ring ), strerror ( rc ) );
-			/* Leave in recycled list and wait for next refill */
-			return rc;
-		}
-
-		/* Remove from recycled list */
-		list_del ( &iobuf->list );
-		profile_stop ( &ncm_refill_profiler );
-	}
-
-	return 0;
-}
-
-/**
- * Recycle receive buffer
- *
- * @v ncm		CDC-NCM device
- * @v ring		Receive ring
- * @v iobuf		I/O buffer
- */
-static inline void ncm_rx_recycle ( struct ncm_device *ncm __unused,
-				    struct ncm_rx_ring *ring,
-				    struct io_buffer *iobuf ) {
-
-	/* Add to recycled list */
-	list_add_tail ( &iobuf->list, &ring->list );
-}
-
-/**
- * Free receive ring
- *
- * @v ncm		CDC-NCM device
- * @v ring		Receive ring
- */
-static void ncm_rx_free ( struct ncm_device *ncm __unused,
-			  struct ncm_rx_ring *ring ) {
-	struct io_buffer *iobuf;
-	struct io_buffer *tmp;
-
-	/* Free I/O buffers */
-	list_for_each_entry_safe ( iobuf, tmp, &ring->list, list ) {
-		list_del ( &iobuf->list );
-		free_iob ( iobuf );
-	}
-}
-
-/******************************************************************************
- *
  * CDC-NCM communications interface
  *
  ******************************************************************************
@@ -209,7 +72,8 @@ static void ncm_rx_free ( struct ncm_device *ncm __unused,
  */
 static void ncm_intr_complete ( struct usb_endpoint *ep,
 				struct io_buffer *iobuf, int rc ) {
-	struct ncm_device *ncm = container_of ( ep, struct ncm_device, intr.ep);
+	struct ncm_device *ncm = container_of ( ep, struct ncm_device,
+						usbnet.intr );
 	struct net_device *netdev = ncm->netdev;
 	struct usb_setup_packet *message;
 	size_t len = iob_len ( iobuf );
@@ -219,21 +83,22 @@ static void ncm_intr_complete ( struct usb_endpoint *ep,
 
 	/* Ignore packets cancelled when the endpoint closes */
 	if ( ! ep->open )
-		goto done;
+		goto ignore;
 
 	/* Ignore packets with errors */
 	if ( rc != 0 ) {
 		DBGC ( ncm, "NCM %p interrupt failed: %s\n",
 		       ncm, strerror ( rc ) );
 		DBGC_HDA ( ncm, 0, iobuf->data, iob_len ( iobuf ) );
-		goto done;
+		goto error;
 	}
 
 	/* Extract message header */
 	if ( len < sizeof ( *message ) ) {
 		DBGC ( ncm, "NCM %p underlength interrupt:\n", ncm );
 		DBGC_HDA ( ncm, 0, iobuf->data, iob_len ( iobuf ) );
-		goto done;
+		rc = -EINVAL;
+		goto error;
 	}
 	message = iobuf->data;
 
@@ -257,66 +122,26 @@ static void ncm_intr_complete ( struct usb_endpoint *ep,
 	default:
 		DBGC ( ncm, "NCM %p unrecognised interrupt:\n", ncm );
 		DBGC_HDA ( ncm, 0, iobuf->data, iob_len ( iobuf ) );
-		break;
+		goto error;
 	}
 
- done:
-	/* Recycle buffer */
-	ncm_rx_recycle ( ncm, &ncm->intr, iobuf );
+	/* Free I/O buffer */
+	free_iob ( iobuf );
 	profile_stop ( &ncm_intr_profiler );
+
+	return;
+
+ error:
+	netdev_rx_err ( netdev, iob_disown ( iobuf ), rc );
+ ignore:
+	free_iob ( iobuf );
+	return;
 }
 
 /** Interrupt endpoint operations */
 static struct usb_endpoint_driver_operations ncm_intr_operations = {
 	.complete = ncm_intr_complete,
 };
-
-/**
- * Open communications interface
- *
- * @v ncm		CDC-NCM device
- * @ret rc		Return status code
- */
-static int ncm_comms_open ( struct ncm_device *ncm ) {
-	int rc;
-
-	/* Allocate I/O buffers */
-	if ( ( rc = ncm_rx_alloc ( ncm, &ncm->intr, ncm->intr.ep.mtu,
-				   NCM_INTR_COUNT ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not allocate RX buffers: %s\n",
-		       ncm, strerror ( rc ) );
-		goto err_alloc;
-	}
-
-	/* Open interrupt endpoint */
-	if ( ( rc = usb_endpoint_open ( &ncm->intr.ep ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not open interrupt: %s\n",
-		       ncm, strerror ( rc ) );
-		goto err_open;
-	}
-
-	return 0;
-
-	usb_endpoint_close ( &ncm->intr.ep );
- err_open:
-	ncm_rx_free ( ncm, &ncm->intr );
- err_alloc:
-	return rc;
-}
-
-/**
- * Close communications interface
- *
- * @v ncm		CDC-NCM device
- */
-static void ncm_comms_close ( struct ncm_device *ncm ) {
-
-	/* Close interrupt endpoint */
-	usb_endpoint_close ( &ncm->intr.ep );
-
-	/* Free I/O buffers */
-	ncm_rx_free ( ncm, &ncm->intr );
-}
 
 /******************************************************************************
  *
@@ -326,12 +151,13 @@ static void ncm_comms_close ( struct ncm_device *ncm ) {
  */
 
 /**
- * Allocate bulk IN receive ring buffers
+ * Prefill bulk IN endpoint
  *
  * @v ncm		CDC-NCM device
  * @ret rc		Return status code
  */
-static int ncm_in_alloc ( struct ncm_device *ncm ) {
+static int ncm_in_prefill ( struct ncm_device *ncm ) {
+	struct usb_bus *bus = ncm->bus;
 	size_t mtu;
 	unsigned int count;
 	int rc;
@@ -353,20 +179,26 @@ static int ncm_in_alloc ( struct ncm_device *ncm ) {
 		/* Attempt allocation at this MTU */
 		if ( mtu > NCM_MAX_NTB_INPUT_SIZE )
 			continue;
+		if ( mtu > bus->mtu )
+			continue;
 		count = ( NCM_IN_MIN_SIZE / mtu );
 		if ( count < NCM_IN_MIN_COUNT )
 			count = NCM_IN_MIN_COUNT;
 		if ( ( count * mtu ) > NCM_IN_MAX_SIZE )
 			continue;
-		if ( ( rc = ncm_rx_alloc ( ncm, &ncm->in, mtu, count ) ) != 0 )
+		usb_refill_init ( &ncm->usbnet.in, mtu, count );
+		if ( ( rc = usb_prefill ( &ncm->usbnet.in ) ) != 0 ) {
+			DBGC ( ncm, "NCM %p could not prefill %dx %zd-byte "
+			       "buffers for bulk IN\n", ncm, count, mtu );
 			continue;
+		}
 
 		DBGC ( ncm, "NCM %p using %dx %zd-byte buffers for bulk IN\n",
 		       ncm, count, mtu );
 		return 0;
 	}
 
-	DBGC ( ncm, "NCM %p could not allocate bulk IN buffers\n", ncm );
+	DBGC ( ncm, "NCM %p could not prefill bulk IN endpoint\n", ncm );
 	return -ENOMEM;
 }
 
@@ -379,7 +211,8 @@ static int ncm_in_alloc ( struct ncm_device *ncm ) {
  */
 static void ncm_in_complete ( struct usb_endpoint *ep, struct io_buffer *iobuf,
 			      int rc ) {
-	struct ncm_device *ncm = container_of ( ep, struct ncm_device, in.ep );
+	struct ncm_device *ncm = container_of ( ep, struct ncm_device,
+						usbnet.in );
 	struct net_device *netdev = ncm->netdev;
 	struct ncm_transfer_header *nth;
 	struct ncm_datagram_pointer *ndp;
@@ -404,13 +237,14 @@ static void ncm_in_complete ( struct usb_endpoint *ep, struct io_buffer *iobuf,
 	if ( rc != 0 ) {
 		DBGC ( ncm, "NCM %p bulk IN failed: %s\n",
 		       ncm, strerror ( rc ) );
-		goto drop;
+		goto error;
 	}
 
 	/* Locate transfer header */
 	len = iob_len ( iobuf );
 	if ( sizeof ( *nth ) > len ) {
 		DBGC ( ncm, "NCM %p packet too short for NTH:\n", ncm );
+		rc = -EINVAL;
 		goto error;
 	}
 	nth = iobuf->data;
@@ -419,16 +253,19 @@ static void ncm_in_complete ( struct usb_endpoint *ep, struct io_buffer *iobuf,
 	ndp_offset = le16_to_cpu ( nth->offset );
 	if ( ( ndp_offset + sizeof ( *ndp ) ) > len ) {
 		DBGC ( ncm, "NCM %p packet too short for NDP:\n", ncm );
+		rc = -EINVAL;
 		goto error;
 	}
 	ndp = ( iobuf->data + ndp_offset );
 	ndp_len = le16_to_cpu ( ndp->header_len );
 	if ( ndp_len < offsetof ( typeof ( *ndp ), desc ) ) {
 		DBGC ( ncm, "NCM %p NDP header length too short:\n", ncm );
+		rc = -EINVAL;
 		goto error;
 	}
 	if ( ( ndp_offset + ndp_len ) > len ) {
 		DBGC ( ncm, "NCM %p packet too short for NDP:\n", ncm );
+		rc = -EINVAL;
 		goto error;
 	}
 
@@ -445,10 +282,12 @@ static void ncm_in_complete ( struct usb_endpoint *ep, struct io_buffer *iobuf,
 		pkt_len = le16_to_cpu ( desc->len );
 		if ( pkt_len < ETH_HLEN ) {
 			DBGC ( ncm, "NCM %p underlength datagram:\n", ncm );
+			rc = -EINVAL;
 			goto error;
 		}
 		if ( ( pkt_offset + pkt_len ) > len ) {
 			DBGC ( ncm, "NCM %p datagram exceeds packet:\n", ncm );
+			rc = -EINVAL;
 			goto error;
 		}
 
@@ -468,8 +307,7 @@ static void ncm_in_complete ( struct usb_endpoint *ep, struct io_buffer *iobuf,
 		 * received packet and reuse the same I/O buffer for
 		 * transmission.
 		 */
-		headroom = ( sizeof ( struct ncm_ntb_header ) +
-			     ncm->out.padding );
+		headroom = ( sizeof ( struct ncm_ntb_header ) + ncm->padding );
 		pkt = alloc_iob ( headroom + pkt_len );
 		if ( ! pkt ) {
 			/* Record error and continue */
@@ -490,19 +328,17 @@ static void ncm_in_complete ( struct usb_endpoint *ep, struct io_buffer *iobuf,
 	}
 
 	/* Recycle I/O buffer */
-	ncm_rx_recycle ( ncm, &ncm->in, iobuf );
+	usb_recycle ( &ncm->usbnet.in, iobuf );
 	profile_stop ( &ncm_in_profiler );
 
 	return;
 
  error:
-	rc = -EIO;
- drop:
 	/* Record error against network device */
 	DBGC_HDA ( ncm, 0, iobuf->data, iob_len ( iobuf ) );
 	netdev_rx_err ( netdev, NULL, rc );
  ignore:
-	ncm_rx_recycle ( ncm, &ncm->in, iobuf );
+	usb_recycle ( &ncm->usbnet.in, iobuf );
 }
 
 /** Bulk IN endpoint operations */
@@ -521,7 +357,7 @@ static int ncm_out_transmit ( struct ncm_device *ncm,
 			      struct io_buffer *iobuf ) {
 	struct ncm_ntb_header *header;
 	size_t len = iob_len ( iobuf );
-	size_t header_len = ( sizeof ( *header ) + ncm->out.padding );
+	size_t header_len = ( sizeof ( *header ) + ncm->padding );
 	int rc;
 
 	/* Profile transmissions */
@@ -535,7 +371,7 @@ static int ncm_out_transmit ( struct ncm_device *ncm,
 	/* Populate header */
 	header->nth.magic = cpu_to_le32 ( NCM_TRANSFER_HEADER_MAGIC );
 	header->nth.header_len = cpu_to_le16 ( sizeof ( header->nth ) );
-	header->nth.sequence = cpu_to_le16 ( ncm->out.sequence );
+	header->nth.sequence = cpu_to_le16 ( ncm->sequence );
 	header->nth.len = cpu_to_le16 ( iob_len ( iobuf ) );
 	header->nth.offset =
 		cpu_to_le16 ( offsetof ( typeof ( *header ), ndp ) );
@@ -548,11 +384,11 @@ static int ncm_out_transmit ( struct ncm_device *ncm,
 	memset ( &header->desc[1], 0, sizeof ( header->desc[1] ) );
 
 	/* Enqueue I/O buffer */
-	if ( ( rc = usb_stream ( &ncm->out.ep, iobuf ) ) != 0 )
+	if ( ( rc = usb_stream ( &ncm->usbnet.out, iobuf, 0 ) ) != 0 )
 		return rc;
 
 	/* Increment sequence number */
-	ncm->out.sequence++;
+	ncm->sequence++;
 
 	profile_stop ( &ncm_out_profiler );
 	return 0;
@@ -567,7 +403,8 @@ static int ncm_out_transmit ( struct ncm_device *ncm,
  */
 static void ncm_out_complete ( struct usb_endpoint *ep, struct io_buffer *iobuf,
 			       int rc ) {
-	struct ncm_device *ncm = container_of ( ep, struct ncm_device, out.ep );
+	struct ncm_device *ncm = container_of ( ep, struct ncm_device,
+						usbnet.out );
 	struct net_device *netdev = ncm->netdev;
 
 	/* Report TX completion */
@@ -578,89 +415,6 @@ static void ncm_out_complete ( struct usb_endpoint *ep, struct io_buffer *iobuf,
 static struct usb_endpoint_driver_operations ncm_out_operations = {
 	.complete = ncm_out_complete,
 };
-
-/**
- * Open data interface
- *
- * @v ncm		CDC-NCM device
- * @ret rc		Return status code
- */
-static int ncm_data_open ( struct ncm_device *ncm ) {
-	struct usb_device *usb = ncm->usb;
-	struct ncm_set_ntb_input_size size;
-	int rc;
-
-	/* Allocate I/O buffers */
-	if ( ( rc = ncm_in_alloc ( ncm ) ) != 0 )
-		goto err_alloc;
-
-	/* Set maximum input size */
-	memset ( &size, 0, sizeof ( size ) );
-	size.mtu = cpu_to_le32 ( ncm->in.mtu );
-	if ( ( rc = usb_control ( usb, NCM_SET_NTB_INPUT_SIZE, 0, ncm->comms,
-				  &size, sizeof ( size ) ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not set input size to %zd: %s\n",
-		       ncm, ncm->in.mtu, strerror ( rc ) );
-		goto err_set_ntb_input_size;
-	}
-
-	/* Select alternate setting for data interface */
-	if ( ( rc = usb_set_interface ( usb, ncm->data,
-					NCM_DATA_ALTERNATE ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not set alternate interface: %s\n",
-		       ncm, strerror ( rc ) );
-		goto err_set_interface;
-	}
-
-	/* Open bulk IN endpoint */
-	if ( ( rc = usb_endpoint_open ( &ncm->in.ep ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not open bulk IN: %s\n",
-		       ncm, strerror ( rc ) );
-		goto err_open_in;
-	}
-
-	/* Open bulk OUT endpoint */
-	if ( ( rc = usb_endpoint_open ( &ncm->out.ep ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not open bulk OUT: %s\n",
-		       ncm, strerror ( rc ) );
-		goto err_open_out;
-	}
-
-	/* Reset transmit sequence number */
-	ncm->out.sequence = 0;
-
-	return 0;
-
-	usb_endpoint_close ( &ncm->out.ep );
- err_open_out:
-	usb_endpoint_close ( &ncm->in.ep );
- err_open_in:
-	usb_set_interface ( usb, ncm->data, 0 );
- err_set_interface:
- err_set_ntb_input_size:
-	ncm_rx_free ( ncm, &ncm->in );
- err_alloc:
-	return rc;
-}
-
-/**
- * Close data interface
- *
- * @v ncm		CDC-NCM device
- */
-static void ncm_data_close ( struct ncm_device *ncm ) {
-	struct usb_device *usb = ncm->usb;
-
-	/* Close endpoints */
-	usb_endpoint_close ( &ncm->out.ep );
-	usb_endpoint_close ( &ncm->in.ep );
-
-	/* Reset data interface */
-	usb_set_interface ( usb, ncm->data, 0 );
-
-	/* Free I/O buffers */
-	ncm_rx_free ( ncm, &ncm->in );
-}
 
 /******************************************************************************
  *
@@ -677,35 +431,42 @@ static void ncm_data_close ( struct ncm_device *ncm ) {
  */
 static int ncm_open ( struct net_device *netdev ) {
 	struct ncm_device *ncm = netdev->priv;
+	struct usb_device *usb = ncm->usb;
+	struct ncm_set_ntb_input_size size;
 	int rc;
 
 	/* Reset sequence number */
-	ncm->out.sequence = 0;
+	ncm->sequence = 0;
 
-	/* Open communications interface */
-	if ( ( rc = ncm_comms_open ( ncm ) ) != 0 )
-		goto err_comms_open;
+	/* Prefill I/O buffers */
+	if ( ( rc = ncm_in_prefill ( ncm ) ) != 0 )
+		goto err_prefill;
 
-	/* Refill interrupt ring */
-	if ( ( rc = ncm_rx_refill ( ncm, &ncm->intr ) ) != 0 )
-		goto err_intr_refill;
+	/* Set maximum input size */
+	memset ( &size, 0, sizeof ( size ) );
+	size.mtu = cpu_to_le32 ( ncm->usbnet.in.len );
+	if ( ( rc = usb_control ( usb, NCM_SET_NTB_INPUT_SIZE, 0,
+				  ncm->usbnet.comms, &size,
+				  sizeof ( size ) ) ) != 0 ) {
+		DBGC ( ncm, "NCM %p could not set input size to %zd: %s\n",
+		       ncm, ncm->usbnet.in.len, strerror ( rc ) );
+		goto err_set_ntb_input_size;
+	}
 
-	/* Open data interface */
-	if ( ( rc = ncm_data_open ( ncm ) ) != 0 )
-		goto err_data_open;
-
-	/* Refill bulk IN ring */
-	if ( ( rc = ncm_rx_refill ( ncm, &ncm->in ) ) != 0 )
-		goto err_in_refill;
+	/* Open USB network device */
+	if ( ( rc = usbnet_open ( &ncm->usbnet ) ) != 0 ) {
+		DBGC ( ncm, "NCM %p could not open: %s\n",
+		       ncm, strerror ( rc ) );
+		goto err_open;
+	}
 
 	return 0;
 
- err_in_refill:
-	ncm_data_close ( ncm );
- err_data_open:
- err_intr_refill:
-	ncm_comms_close ( ncm );
- err_comms_open:
+	usbnet_close ( &ncm->usbnet );
+ err_open:
+ err_set_ntb_input_size:
+	usb_flush ( &ncm->usbnet.in );
+ err_prefill:
 	return rc;
 }
 
@@ -717,11 +478,8 @@ static int ncm_open ( struct net_device *netdev ) {
 static void ncm_close ( struct net_device *netdev ) {
 	struct ncm_device *ncm = netdev->priv;
 
-	/* Close data interface */
-	ncm_data_close ( ncm );
-
-	/* Close communications interface */
-	ncm_comms_close ( ncm );
+	/* Close USB network device */
+	usbnet_close ( &ncm->usbnet );
 }
 
 /**
@@ -755,13 +513,10 @@ static void ncm_poll ( struct net_device *netdev ) {
 	/* Poll USB bus */
 	usb_poll ( ncm->bus );
 
-	/* Refill interrupt ring */
-	if ( ( rc = ncm_rx_refill ( ncm, &ncm->intr ) ) != 0 )
+	/* Refill endpoints */
+	if ( ( rc = usbnet_refill ( &ncm->usbnet ) ) != 0 )
 		netdev_rx_err ( netdev, NULL, rc );
 
-	/* Refill bulk IN ring */
-	if ( ( rc = ncm_rx_refill ( ncm, &ncm->in ) ) != 0 )
-		netdev_rx_err ( netdev, NULL, rc );
 }
 
 /** CDC-NCM network device operations */
@@ -792,7 +547,6 @@ static int ncm_probe ( struct usb_function *func,
 	struct net_device *netdev;
 	struct ncm_device *ncm;
 	struct usb_interface_descriptor *comms;
-	struct usb_interface_descriptor *data;
 	struct ecm_ethernet_descriptor *ethernet;
 	struct ncm_ntb_parameters params;
 	int rc;
@@ -810,63 +564,21 @@ static int ncm_probe ( struct usb_function *func,
 	ncm->usb = usb;
 	ncm->bus = usb->port->hub->bus;
 	ncm->netdev = netdev;
-	usb_endpoint_init ( &ncm->intr.ep, usb, &ncm_intr_operations );
-	usb_endpoint_init ( &ncm->in.ep, usb, &ncm_in_operations );
-	usb_endpoint_init ( &ncm->out.ep, usb, &ncm_out_operations );
+	usbnet_init ( &ncm->usbnet, func, &ncm_intr_operations,
+		      &ncm_in_operations, &ncm_out_operations );
+	usb_refill_init ( &ncm->usbnet.intr, 0, NCM_INTR_COUNT );
 	DBGC ( ncm, "NCM %p on %s\n", ncm, func->name );
 
-	/* Identify interfaces */
-	if ( func->count < NCM_INTERFACE_COUNT ) {
-		DBGC ( ncm, "NCM %p has only %d interfaces\n",
-		       ncm, func->count );
-		rc = -EINVAL;
-		goto err_count;
-	}
-	ncm->comms = func->interface[NCM_INTERFACE_COMMS];
-	ncm->data = func->interface[NCM_INTERFACE_DATA];
-
-	/* Locate communications interface descriptor */
-	comms = usb_interface_descriptor ( config, ncm->comms, 0 );
-	if ( ! comms ) {
-		DBGC ( ncm, "NCM %p has no communications interface\n", ncm );
-		rc = -EINVAL;
-		goto err_comms;
-	}
-
-	/* Locate data interface descriptor */
-	data = usb_interface_descriptor ( config, ncm->data,
-					  NCM_DATA_ALTERNATE );
-	if ( ! data ) {
-		DBGC ( ncm, "NCM %p has no data interface\n", ncm );
-		rc = -EINVAL;
-		goto err_data;
-	}
-
-	/* Describe interrupt endpoint */
-	if ( ( rc = usb_endpoint_described ( &ncm->intr.ep, config, comms,
-					     USB_INTERRUPT, 0 ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not describe interrupt endpoint: "
-		       "%s\n", ncm, strerror ( rc ) );
-		goto err_interrupt;
-	}
-
-	/* Describe bulk IN endpoint */
-	if ( ( rc = usb_endpoint_described ( &ncm->in.ep, config, data,
-					     USB_BULK_IN, 0 ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not describe bulk IN endpoint: "
-		       "%s\n", ncm, strerror ( rc ) );
-		goto err_bulk_in;
-	}
-
-	/* Describe bulk OUT endpoint */
-	if ( ( rc = usb_endpoint_described ( &ncm->out.ep, config, data,
-					     USB_BULK_OUT, 0 ) ) != 0 ) {
-		DBGC ( ncm, "NCM %p could not describe bulk OUT endpoint: "
-		       "%s\n", ncm, strerror ( rc ) );
-		goto err_bulk_out;
+	/* Describe USB network device */
+	if ( ( rc = usbnet_describe ( &ncm->usbnet, config ) ) != 0 ) {
+		DBGC ( ncm, "NCM %p could not describe: %s\n",
+		       ncm, strerror ( rc ) );
+		goto err_describe;
 	}
 
 	/* Locate Ethernet descriptor */
+	comms = usb_interface_descriptor ( config, ncm->usbnet.comms, 0 );
+	assert ( comms != NULL );
 	ethernet = ecm_ethernet_descriptor ( config, comms );
 	if ( ! ethernet ) {
 		DBGC ( ncm, "NCM %p has no Ethernet descriptor\n", ncm );
@@ -882,8 +594,9 @@ static int ncm_probe ( struct usb_function *func,
 	}
 
 	/* Get NTB parameters */
-	if ( ( rc = usb_control ( usb, NCM_GET_NTB_PARAMETERS, 0, ncm->comms,
-				  &params, sizeof ( params ) ) ) != 0 ) {
+	if ( ( rc = usb_control ( usb, NCM_GET_NTB_PARAMETERS, 0,
+				  ncm->usbnet.comms, &params,
+				  sizeof ( params ) ) ) != 0 ) {
 		DBGC ( ncm, "NCM %p could not get NTB parameters: %s\n",
 		       ncm, strerror ( rc ) );
 		goto err_ntb_parameters;
@@ -894,12 +607,12 @@ static int ncm_probe ( struct usb_function *func,
 	DBGC2 ( ncm, "NCM %p maximum IN size is %zd bytes\n", ncm, ncm->mtu );
 
 	/* Calculate transmit padding */
-	ncm->out.padding = ( ( le16_to_cpu ( params.out.remainder ) -
-			       sizeof ( struct ncm_ntb_header ) - ETH_HLEN ) &
-			     ( le16_to_cpu ( params.out.divisor ) - 1 ) );
+	ncm->padding = ( ( le16_to_cpu ( params.out.remainder ) -
+			   sizeof ( struct ncm_ntb_header ) - ETH_HLEN ) &
+			 ( le16_to_cpu ( params.out.divisor ) - 1 ) );
 	DBGC2 ( ncm, "NCM %p using %zd-byte transmit padding\n",
-		ncm, ncm->out.padding );
-	assert ( ( ( sizeof ( struct ncm_ntb_header ) + ncm->out.padding +
+		ncm, ncm->padding );
+	assert ( ( ( sizeof ( struct ncm_ntb_header ) + ncm->padding +
 		     ETH_HLEN ) % le16_to_cpu ( params.out.divisor ) ) ==
 		 le16_to_cpu ( params.out.remainder ) );
 
@@ -915,12 +628,7 @@ static int ncm_probe ( struct usb_function *func,
  err_ntb_parameters:
  err_fetch_mac:
  err_ethernet:
- err_bulk_out:
- err_bulk_in:
- err_interrupt:
- err_data:
- err_comms:
- err_count:
+ err_describe:
 	netdev_nullify ( netdev );
 	netdev_put ( netdev );
  err_alloc:

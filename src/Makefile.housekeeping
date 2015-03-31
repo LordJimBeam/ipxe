@@ -157,17 +157,6 @@ SP_FLAGS := $(shell $(SP_TEST) && $(ECHO) '-fno-stack-protector')
 WORKAROUND_CFLAGS += $(SP_FLAGS)
 endif
 
-# Some widespread patched versions of gcc include -fPIE -Wl,-pie by
-# default.  Note that gcc will exit *successfully* if it fails to
-# recognise an option that starts with "no", so we have to test for
-# output on stderr instead of checking the exit status.
-#
-ifeq ($(CCTYPE),gcc)
-PIE_TEST = [ -z "`$(CC) -fno-PIE -nopie -x c -c /dev/null -o /dev/null 2>&1`" ]
-PIE_FLAGS := $(shell $(PIE_TEST) && $(ECHO) '-fno-PIE -nopie')
-WORKAROUND_CFLAGS += $(PIE_FLAGS)
-endif
-
 # gcc 4.4 generates .eh_frame sections by default, which distort the
 # output of "size".  Inhibit this.
 #
@@ -1012,7 +1001,7 @@ BLIB		= $(BIN)/blib.a
 $(BLIB) : $(BLIB_OBJS) $(BLIB_LIST) $(MAKEDEPS)
 	$(Q)$(RM) $(BLIB)
 	$(QM)$(ECHO) "  [AR] $@"
-	$(Q)$(AR) r $@ $(BLIB_OBJS)
+	$(Q)$(AR) r $@ $(sort $(BLIB_OBJS))
 	$(Q)$(RANLIB) $@
 blib : $(BLIB)
 
@@ -1231,15 +1220,12 @@ endif # defined(BIN)
 #
 # The compression utilities
 #
-$(NRV2B) : util/nrv2b.c $(MAKEDEPS)
-	$(QM)$(ECHO) "  [HOSTCC] $@"
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -DENCODE -DDECODE -DMAIN -DVERBOSE \
-		       -DNDEBUG -DBITSIZE=32 -DENDIAN=0 -o $@ $<
-CLEANUP	+= $(NRV2B)
 
-$(ZBIN) : util/zbin.c util/nrv2b.c $(MAKEDEPS)
+ZBIN_LDFLAGS := -llzma
+
+$(ZBIN) : util/zbin.c $(MAKEDEPS)
 	$(QM)$(ECHO) "  [HOSTCC] $@"
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -o $@ $<
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) $< $(ZBIN_LDFLAGS) -o $@
 CLEANUP += $(ZBIN)
 
 ###############################################################################
@@ -1316,31 +1302,6 @@ $(CONFIG_LOCAL_NAMED_HEADERS) :
 .PRECIOUS : $(CONFIG_LOCAL_NAMED_HEADERS)
 
 endif
-
-###############################################################################
-#
-# Auto-incrementing build serial number.  Append "bs" to your list of
-# build targets to get a serial number printed at the end of the
-# build.  Enable -DBUILD_SERIAL in order to see it when the code runs.
-#
-BUILDSERIAL_H		= config/.buildserial.h
-BUILDSERIAL_NOW		= config/.buildserial.now
-BUILDSERIAL_NEXT	= config/.buildserial.next
-
-$(BUILDSERIAL_NOW) $(BUILDSERIAL_NEXT) :
-	$(ECHO) 1 > $@
-
-$(BUILDSERIAL_H) : $(BUILDSERIAL_NOW) $(BUILDSERIAL_NEXT)
-	$(ECHO) '#define BUILD_SERIAL_NUM $(shell cat $<)' > $@
-
-ifeq ($(filter bs,$(MAKECMDGOALS)),bs)
-$(shell diff -q $(BUILDSERIAL_NOW) $(BUILDSERIAL_NEXT) > /dev/null || \
-	cp -f $(BUILDSERIAL_NEXT) $(BUILDSERIAL_NOW))
-endif
-
-bs : $(BUILDSERIAL_NOW)
-	@$(ECHO) $$(( $(shell cat $<) + 1 )) > $(BUILDSERIAL_NEXT)
-	@$(ECHO) "Build serial number is $(shell cat $<)"
 
 ###############################################################################
 #
