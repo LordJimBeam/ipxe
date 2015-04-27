@@ -91,7 +91,9 @@ enum intel_descriptor_status {
 /** Interrupt Cause Read Register */
 #define INTEL_ICR 0x000c0UL
 #define INTEL_IRQ_TXDW		0x00000001UL	/**< Transmit descriptor done */
+#define INTEL_IRQ_TXQE		0x00000002UL	/**< Transmit queue empty */
 #define INTEL_IRQ_LSC		0x00000004UL	/**< Link status change */
+#define INTEL_IRQ_RXDMT0	0x00000010UL	/**< Receive queue low */
 #define INTEL_IRQ_RXT0		0x00000080UL	/**< Receive timer */
 #define INTEL_IRQ_RXO		0x00000400UL	/**< Receive overrun */
 
@@ -231,6 +233,8 @@ struct intel_nic {
 	unsigned int port;
 	/** Flags */
 	unsigned int flags;
+	/** Forced interrupts */
+	unsigned int force_icr;
 
 	/** EEPROM */
 	struct nvs_device eeprom;
@@ -251,6 +255,8 @@ struct intel_nic {
 enum intel_flags {
 	/** PBS/PBA errata workaround required */
 	INTEL_PBS_ERRATA = 0x0001,
+	/** VMware missing interrupt workaround required */
+	INTEL_VMWARE = 0x0002,
 };
 
 extern int intel_create_ring ( struct intel_nic *intel,

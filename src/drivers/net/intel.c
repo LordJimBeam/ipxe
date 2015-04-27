@@ -572,6 +572,13 @@ static int intel_open ( struct net_device *netdev ) {
 	/* Update link state */
 	intel_check_link ( netdev );
 
+	/* Apply required errata */
+	if ( intel->flags & INTEL_VMWARE ) {
+		DBGC ( intel, "INTEL %p applying VMware errata workaround\n",
+		       intel );
+		intel->force_icr = INTEL_IRQ_RXT0;
+	}
+
 	return 0;
 
 	intel_destroy_ring ( intel, &intel->rx );
@@ -740,6 +747,7 @@ static void intel_poll ( struct net_device *netdev ) {
 	icr = readl ( intel->regs + INTEL_ICR );
 	profile_stop ( &intel_vm_poll_profiler );
 	profile_exclude ( &intel_vm_poll_profiler );
+	icr |= intel->force_icr;
 	if ( ! icr )
 		return;
 
@@ -758,6 +766,14 @@ static void intel_poll ( struct net_device *netdev ) {
 	/* Check link state, if applicable */
 	if ( icr & INTEL_IRQ_LSC )
 		intel_check_link ( netdev );
+
+	/* Check for unexpected interrupts */
+	if ( icr & ~( INTEL_IRQ_TXDW | INTEL_IRQ_TXQE | INTEL_IRQ_LSC |
+		      INTEL_IRQ_RXDMT0 | INTEL_IRQ_RXT0 | INTEL_IRQ_RXO ) ) {
+		DBGC ( intel, "INTEL %p unexpected ICR %08x\n", intel, icr );
+		/* Report as a TX error */
+		netdev_tx_err ( netdev, NULL, -ENOTSUP );
+	}
 
 	/* Refill RX ring */
 	intel_refill_rx ( intel );
@@ -899,7 +915,7 @@ static struct pci_device_id intel_nics[] = {
 	PCI_ROM ( 0x8086, 0x100c, "82544gc", "82544GC (Copper)", 0 ),
 	PCI_ROM ( 0x8086, 0x100d, "82544gc-l", "82544GC (LOM)", 0 ),
 	PCI_ROM ( 0x8086, 0x100e, "82540em", "82540EM", 0 ),
-	PCI_ROM ( 0x8086, 0x100f, "82545em", "82545EM (Copper)", 0 ),
+	PCI_ROM ( 0x8086, 0x100f, "82545em", "82545EM (Copper)", INTEL_VMWARE ),
 	PCI_ROM ( 0x8086, 0x1010, "82546eb", "82546EB (Copper)", 0 ),
 	PCI_ROM ( 0x8086, 0x1011, "82545em-f", "82545EM (Fiber)", 0 ),
 	PCI_ROM ( 0x8086, 0x1012, "82546eb-f", "82546EB (Fiber)", 0 ),
@@ -1001,8 +1017,13 @@ static struct pci_device_id intel_nics[] = {
 	PCI_ROM ( 0x8086, 0x1527, "82580-f2", "82580 Fiber", 0 ),
 	PCI_ROM ( 0x8086, 0x1533, "i210", "I210", 0 ),
 	PCI_ROM ( 0x8086, 0x153a, "i217lm", "I217-LM", 0 ),
-	PCI_ROM ( 0x8086, 0x155a, "i218lm", "I218-LM", 0),
 	PCI_ROM ( 0x8086, 0x153b, "i217v", "I217-V", 0 ),
+	PCI_ROM ( 0x8086, 0x1559, "i218v", "I218-V", 0),
+	PCI_ROM ( 0x8086, 0x155a, "i218lm", "I218-LM", 0),
+	PCI_ROM ( 0x8086, 0x15a0, "i218lm-2", "I218-LM", 0 ),
+	PCI_ROM ( 0x8086, 0x15a1, "i218v-2", "I218-V", 0 ),
+	PCI_ROM ( 0x8086, 0x15a2, "i218lm-3", "I218-LM", 0 ),
+	PCI_ROM ( 0x8086, 0x15a3, "i218v-3", "I218-V", 0 ),
 	PCI_ROM ( 0x8086, 0x294c, "82566dc-2", "82566DC-2", 0 ),
 	PCI_ROM ( 0x8086, 0x2e6e, "cemedia", "CE Media Processor", 0 ),
 };
