@@ -40,3 +40,23 @@ REQUIRE_OBJECT ( xhci );
 #ifdef USB_HCD_EHCI
 REQUIRE_OBJECT ( ehci );
 #endif
+#ifdef USB_HCD_UHCI
+REQUIRE_OBJECT ( uhci );
+#endif
+#ifdef USB_HCD_USBIO
+REQUIRE_OBJECT ( usbio );
+#endif
+
+/*
+ * Drag in USB peripherals
+ */
+#ifdef USB_KEYBOARD
+REQUIRE_OBJECT ( usbkbd );
+#endif
+
+/*
+ * Drag in USB external interfaces
+ */
+#ifdef USB_EFI
+REQUIRE_OBJECT ( efi_usb );
+#endif

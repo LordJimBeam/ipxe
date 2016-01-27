@@ -173,7 +173,7 @@ static int usbnet_comms_describe ( struct usbnet_device *usbnet,
 	int rc;
 
 	/* Iterate over all available interfaces */
-	for ( i = 0 ; i < usbnet->func->count ; i++ ) {
+	for ( i = 0 ; i < usbnet->func->desc.count ; i++ ) {
 
 		/* Get interface number */
 		comms = usbnet->func->interface[i];
@@ -185,7 +185,7 @@ static int usbnet_comms_describe ( struct usbnet_device *usbnet,
 
 		/* Describe interrupt endpoint */
 		if ( ( rc = usb_endpoint_described ( &usbnet->intr, config,
-						     desc, USB_INTERRUPT,
+						     desc, USB_INTERRUPT_IN,
 						     0 ) ) != 0 )
 			continue;
 
@@ -217,7 +217,7 @@ static int usbnet_data_describe ( struct usbnet_device *usbnet,
 	int rc;
 
 	/* Iterate over all available interfaces */
-	for ( i = 0 ; i < usbnet->func->count ; i++ ) {
+	for ( i = 0 ; i < usbnet->func->desc.count ; i++ ) {
 
 		/* Get interface number */
 		data = usbnet->func->interface[i];

@@ -734,8 +734,8 @@ $(DBGCOL_LIST) : $(MAKEDEPS)
 VERYCLEANUP += $(DBGCOL_LIST)
 
 DBGCOL_COLOURS := $(subst -, ,$(DBGCOL))
-DBGCOL_MIN := $(word 1,$(DBGCOL_COLOURS))
-DBGCOL_MAX := $(word 2,$(DBGCOL_COLOURS))
+DBGCOL_MIN := $(firstword $(DBGCOL_COLOURS))
+DBGCOL_MAX := $(lastword $(DBGCOL_COLOURS))
 
 debug_DEPS += $(DBGCOL_LIST)
 
@@ -949,9 +949,8 @@ CLEANUP		+= $(BIN)/NIC	# Doesn't match the $(BIN)/*.* pattern
 
 # Select drivers to be included in the all-drivers build
 #
-DRIVERS		= $(DRIVERS_net) $(DRIVERS_infiniband) \
+DRIVERS_ipxe	= $(DRIVERS_net) $(DRIVERS_infiniband) \
 		  $(DRIVERS_xen) $(DRIVERS_hyperv)
-DRIVERS_ipxe	= $(DRIVERS)
 
 # Analyse a target name (e.g. "bin/dfe538--prism2_pci.rom.tmp") and
 # derive the variables:
@@ -961,13 +960,13 @@ DRIVERS_ipxe	= $(DRIVERS)
 # TGT_DRIVERS  : the driver for each element (e.g. "rtl8139 prism2_pci")
 # TGT_ROM_NAME : the ROM name (e.g. "dfe538")
 #
-CARD_DRIVER	= $(firstword $(DRIVER_$(1)) $(1))
 TGT_ELEMENTS	= $(subst --, ,$(firstword $(subst ., ,$(notdir $@))))
 TGT_ROM_NAME	= $(firstword $(TGT_ELEMENTS))
-TGT_DRIVERS	= $(strip $(if $(DRIVERS_$(TGT_ROM_NAME)), \
-			       $(DRIVERS_$(TGT_ROM_NAME)), \
-			       $(foreach TGT_ELEMENT,$(TGT_ELEMENTS), \
-			         $(call CARD_DRIVER,$(TGT_ELEMENT))) ))
+TGT_DRIVERS	= $(strip $(foreach TGT_ELEMENT,$(TGT_ELEMENTS), \
+				    $(if $(DRIVERS_$(TGT_ELEMENT)), \
+					 $(DRIVERS_$(TGT_ELEMENT)), \
+					 $(firstword $(DRIVER_$(TGT_ELEMENT)) \
+						     $(TGT_ELEMENT)))))
 TGT_PREFIX_NAME	= $(word 2,$(subst ., ,$(notdir $@)))
 TGT_PREFIX	= $(strip $(if $(filter rom,$(TGT_PREFIX_NAME)), \
 			       $(ROM_TYPE_$(TGT_ROM_NAME))rom, \
@@ -1006,7 +1005,7 @@ TGT_LD_ENTRY	= _$(TGT_PREFIX)_start
 #		  --defsym pci_vendor=0x1186 --defsym pci_device=0x1300")
 #
 TGT_LD_FLAGS	= $(foreach SYM,$(TGT_LD_ENTRY) $(TGT_LD_DRIVERS) \
-		    $(TGT_LD_DEVLIST) obj_config,\
+		    $(TGT_LD_DEVLIST) obj_config obj_config_$(PLATFORM),\
 		    -u $(SYM) --defsym check_$(SYM)=$(SYM) ) \
 		  $(patsubst %,--defsym %,$(TGT_LD_IDS)) \
 		  -e $(TGT_LD_ENTRY)
@@ -1302,7 +1301,7 @@ CLEANUP += $(ZBIN)
 ELF2EFI_CFLAGS	:= -I$(BINUTILS_DIR)/include -I$(BFD_DIR)/include \
 		   -I$(ZLIB_DIR)/include -idirafter include
 ELF2EFI_LDFLAGS	:= -L$(BINUTILS_DIR)/lib -L$(BFD_DIR)/lib -L$(ZLIB_DIR)/lib \
-		   -lbfd -ldl -liberty -lz -Wl,--no-warn-search-mismatch
+		   -lbfd -ldl -lz -Wl,--no-warn-search-mismatch
 
 $(ELF2EFI32) : util/elf2efi.c $(MAKEDEPS)
 	$(QM)$(ECHO) "  [HOSTCC] $@"

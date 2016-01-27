@@ -104,6 +104,10 @@ FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 #define PCI_PM_CTRL_PME_ENABLE		0x0100	/**< PME pin enable */
 #define PCI_PM_CTRL_PME_STATUS		0x8000	/**< PME pin status */
 
+/** PCI Express */
+#define PCI_EXP_DEVCTL		0x08
+#define PCI_EXP_DEVCTL_FLR		0x8000	/**< Function level reset */
+
 /** Uncorrectable error status */
 #define PCI_ERR_UNCOR_STATUS	0x04
 
@@ -117,6 +121,19 @@ FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
 #define PCI_CLASS_SERIAL_USB_OHCI	 0x10	/**< OHCI USB controller */
 #define PCI_CLASS_SERIAL_USB_EHCI	 0x20	/**< ECHI USB controller */
 #define PCI_CLASS_SERIAL_USB_XHCI	 0x30	/**< xHCI USB controller */
+
+/** Construct PCI class
+ *
+ * @v base		Base class (or PCI_ANY_ID)
+ * @v sub		Subclass (or PCI_ANY_ID)
+ * @v progif		Programming interface (or PCI_ANY_ID)
+ */
+#define PCI_CLASS( base, sub, progif )					\
+	( ( ( (base) & 0xff ) << 16 ) |	( ( (sub) & 0xff ) << 8 ) |	\
+	  ( ( (progif) & 0xff) << 0 ) )
+
+/** PCI Express function level reset delay (in ms) */
+#define PCI_EXP_FLR_DELAY_MS 100
 
 /** A PCI device ID list entry */
 struct pci_device_id {
@@ -147,10 +164,8 @@ struct pci_class_id {
  * @v sub		Subclass (or PCI_ANY_ID)
  * @v progif		Programming interface (or PCI_ANY_ID)
  */
-#define PCI_CLASS(base,sub,progif) {					   \
-	.class = ( ( ( (base) & 0xff ) << 16 ) |			   \
-		   ( ( (sub) & 0xff ) << 8 ) |				   \
-		   ( ( (progif) & 0xff) << 0 ) ),			   \
+#define PCI_CLASS_ID( base, sub, progif ) {				   \
+	.class = PCI_CLASS ( base, sub, progif ),			   \
 	.mask = ( ( ( ( (base) == PCI_ANY_ID ) ? 0x00 : 0xff ) << 16 ) |   \
 		  ( ( ( (sub) == PCI_ANY_ID ) ? 0x00 : 0xff ) << 8 ) |	   \
 		  ( ( ( (progif) == PCI_ANY_ID ) ? 0x00 : 0xff ) << 0 ) ), \
@@ -231,6 +246,7 @@ struct pci_driver {
 #define PCI_BUSDEVFN( bus, slot, func )	\
 	( ( (bus) << 8 ) | ( (slot) << 3 ) | ( (func) << 0 ) )
 #define PCI_FIRST_FUNC( busdevfn )	( (busdevfn) & ~0x07 )
+#define PCI_LAST_FUNC( busdevfn )	( (busdevfn) | 0x07 )
 
 #define PCI_BASE_CLASS( class )		( (class) >> 16 )
 #define PCI_SUB_CLASS( class )		( ( (class) >> 8 ) & 0xff )

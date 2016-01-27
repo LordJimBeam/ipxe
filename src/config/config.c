@@ -51,11 +51,8 @@ PROVIDE_REQUIRING_SYMBOL();
  *
  */
 
-#ifdef CONSOLE_PCBIOS
-REQUIRE_OBJECT ( bios_console );
-#endif
 #ifdef CONSOLE_SERIAL
-REQUIRE_OBJECT ( serial_console );
+REQUIRE_OBJECT ( serial );
 #endif
 #ifdef CONSOLE_DIRECT_VGA
 REQUIRE_OBJECT ( video_subr );
@@ -80,9 +77,6 @@ REQUIRE_OBJECT ( vmconsole );
 #endif
 #ifdef CONSOLE_DEBUGCON
 REQUIRE_OBJECT ( debugcon );
-#endif
-#ifdef CONSOLE_VESAFB
-REQUIRE_OBJECT ( vesafb );
 #endif
 
 /*
@@ -136,6 +130,9 @@ REQUIRE_OBJECT ( slam );
  */
 #ifdef SANBOOT_PROTO_ISCSI
 REQUIRE_OBJECT ( iscsi );
+#endif
+#ifdef SANBOOT_PROTO_HTTP
+REQUIRE_OBJECT ( httpblock );
 #endif
 
 /*

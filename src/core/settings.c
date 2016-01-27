@@ -1677,16 +1677,8 @@ const struct setting_type setting_type_string __setting_type = {
  */
 static int parse_uristring_setting ( const struct setting_type *type __unused,
 				     const char *value, void *buf, size_t len ){
-	char tmp[ len + 1 /* NUL */ ];
 
-	memcpy ( tmp, value, len );
-	tmp[len] = '\0';
-
-	uri_decode ( tmp );
-
-	memcpy ( buf, tmp, len );
-
-	return len;
+	return uri_decode ( value, buf, len );
 }
 
 /**
@@ -1702,14 +1694,8 @@ static int parse_uristring_setting ( const struct setting_type *type __unused,
 static int format_uristring_setting ( const struct setting_type *type __unused,
 				      const void *raw, size_t raw_len,
 				      char *buf, size_t len ) {
-	char tmp[ raw_len + 1 /* NUL */ ];
 
-	/* Copy to temporary buffer and terminate */
-	memcpy ( tmp, raw, raw_len );
-	tmp[raw_len] = '\0';
-
-	/* Encode directly into output buffer */
-	return uri_encode ( tmp, URI_FRAGMENT, buf, len );
+	return uri_encode ( 0, raw, raw_len, buf, len );
 }
 
 /** A URI-encoded string setting type */
